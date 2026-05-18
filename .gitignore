@@ -1,0 +1,13 @@
+.env
+*.local
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
