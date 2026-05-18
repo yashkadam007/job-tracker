@@ -2,7 +2,7 @@ name: job-tracker
 
 services:
   kafka:
-    image: apache/kafka:3.8.0
+    image: docker.io/apache/kafka:4.2.0
     container_name: job-tracker-kafka
     ports:
       - "9092:9092"
@@ -42,7 +42,7 @@ services:
       retries: 10
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: docker.io/provectuslabs/kafka-ui:latest
     container_name: job-tracker-kafka-ui
     ports:
       - "8080:8080"
@@ -54,7 +54,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: postgres:16
+    image: docker.io/library/postgres:16
     container_name: job-tracker-postgres
     ports:
       - "5432:5432"
