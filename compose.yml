@@ -54,7 +54,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:16-alpine
     container_name: job-tracker-postgres
     ports:
       - "5432:5432"
