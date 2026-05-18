@@ -4,14 +4,17 @@ Kafka-based pipeline that tracks job applications. Built primarily to learn
 Kafka end-to-end while producing something useful.
 
 See [`../../thinking/job-tracker-plan.md`](../../thinking/job-tracker-plan.md)
-for the full design (v1 scope + future scope).
+for the full design (v1 scope + future scope), and
+[`docs/runbook.md`](docs/runbook.md) for step-by-step server testing.
 
 ## Stack
 
 - **Kafka 3.8** in KRaft mode (no ZooKeeper) — message bus
 - **Postgres 16** — job + reminder storage
 - **Kafka UI** — web UI for inspecting topics, messages, consumer groups
-- **Go services** (CLI, Store, Reminder Scheduler, Notifier) — coming soon
+- **Go services** — `cli` (producer), `store` (consumer → Postgres),
+  `scheduler` (consumer + ticker → emits `job.reminder`),
+  `notifier` (consumer → stdout for v1)
 
 ## Layout
 
@@ -56,6 +59,31 @@ When a Go service runs **inside** a container in this compose, it should
 connect to `kafka:29092`. When run **on the host**, it should connect to
 `localhost:9092`. The `.env.example` covers the host case; container
 services will get their own env vars in their compose entries.
+
+## Running the services
+
+Start the infra first (`podman-compose up -d`), then in separate
+terminals:
+
+```bash
+go run ./cmd/cli ensure-topics                # one-time
+go run ./cmd/store                            # leave running
+go run ./cmd/scheduler                        # leave running
+go run ./cmd/notifier                         # leave running
+
+# in a 4th terminal:
+go run ./cmd/cli add --url <u> --title <t> --company <c>
+go run ./cmd/cli status <url> applied
+```
+
+For a fast end-to-end smoke test of reminders without waiting 7 days,
+override the delays:
+
+```bash
+REMINDER_SAVED_SECONDS=10 REMINDER_POLL_SECONDS=2 go run ./cmd/scheduler
+```
+
+Then submit a job and watch the Notifier log fire ~10 seconds later.
 
 ## Kafka concepts you'll see
 
