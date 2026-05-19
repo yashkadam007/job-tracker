@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM docker.io/library/golang:1.25-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -8,6 +8,6 @@ RUN CGO_ENABLED=0 go build -o /out/store     ./cmd/store
 RUN CGO_ENABLED=0 go build -o /out/notifier  ./cmd/notifier
 RUN CGO_ENABLED=0 go build -o /out/scheduler ./cmd/scheduler
 
-FROM alpine:3.21
+FROM docker.io/library/alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /out/ /usr/local/bin/
