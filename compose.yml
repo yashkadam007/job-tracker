@@ -70,6 +70,58 @@ services:
       timeout: 5s
       retries: 10
 
+  store:
+    build: .
+    container_name: job-tracker-store
+    command: [store]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      DATABASE_URL: postgres://jobtracker:jobtracker@postgres:5432/jobtracker?sslmode=disable
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    container_name: job-tracker-scheduler
+    command: [scheduler]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      DATABASE_URL: postgres://jobtracker:jobtracker@postgres:5432/jobtracker?sslmode=disable
+      REMINDER_SAVED_SECONDS: ${REMINDER_SAVED_SECONDS:-}
+      REMINDER_APPLIED_SECONDS: ${REMINDER_APPLIED_SECONDS:-}
+      REMINDER_POLL_SECONDS: ${REMINDER_POLL_SECONDS:-}
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  notifier:
+    build: .
+    container_name: job-tracker-notifier
+    command: [notifier]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  cli:
+    build: .
+    entrypoint: [cli]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+    profiles: [tools]
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   kafka-data:
   postgres-data:

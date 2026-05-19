@@ -1,8 +1,8 @@
 # Runbook — Testing job-tracker on the Ubuntu server
 
 A copy-pasteable walkthrough for bringing the stack up on a fresh
-machine, running the full pipeline, and inspecting state. Aimed at
-first-time setup; subsequent runs collapse to "Step 2 + Step 4".
+machine, running the full pipeline, and inspecting state. Everything
+runs in containers — no Go toolchain needed on the host.
 
 ---
 
@@ -11,17 +11,9 @@ first-time setup; subsequent runs collapse to "Step 2 + Step 4".
 Check on the Ubuntu host once:
 
 ```bash
-go version                  # need 1.25 or newer
 podman --version            # any recent version
-podman-compose --version    # or: docker-compose if you symlink
+podman-compose --version    # or: podman compose version
 psql --version              # only needed if you want to query Postgres directly
-```
-
-If `go` is missing or old:
-
-```bash
-sudo snap install go --classic
-# OR: download from https://go.dev/dl/ and untar to /usr/local
 ```
 
 If `podman-compose` is missing:
@@ -34,32 +26,29 @@ pipx install podman-compose
 
 Rootless podman is fine; nothing here needs root.
 
+> Newer podman ships `podman compose` (space, no hyphen) as a drop-in.
+> Both work — substitute whichever you have.
+
 ---
 
-## 1. Clone & prepare
+## 1. Clone & build images
 
 ```bash
 git clone <your-github-url> ~/job-tracker
 cd ~/job-tracker
-cp .env.example .env       # only needed if you override defaults
+podman-compose build
 ```
 
-Build everything once to populate the module cache and catch issues
-before any service tries to start:
-
-```bash
-go build ./...
-```
-
-You should get no output. Binaries are not produced — that's fine,
-we use `go run` while iterating.
+The build step compiles all four binaries (`cli`, `store`, `scheduler`,
+`notifier`) into a single image and takes ~1–2 minutes on first run.
+Subsequent builds are cached.
 
 ---
 
 ## 2. Start the infra (Kafka + Postgres + Kafka UI)
 
 ```bash
-podman-compose up -d
+podman-compose up -d kafka postgres kafka-ui
 podman-compose ps
 ```
 
@@ -76,7 +65,7 @@ podman-compose logs -f postgres
 Open Kafka UI in a browser (port-forward from your laptop if needed):
 
 ```
-http://localhost:8080
+http://localhost:8088
 ```
 
 You should see one cluster ("job-tracker"), no topics yet.
@@ -86,7 +75,7 @@ You should see one cluster ("job-tracker"), no topics yet.
 ## 3. Create topics
 
 ```bash
-go run ./cmd/cli ensure-topics
+podman-compose run --rm cli ensure-topics
 ```
 
 Expected output:
@@ -105,92 +94,100 @@ In Kafka UI → Topics, you should now see all three.
 
 ## 4. Run the services
 
-Each in its own terminal (or use `tmux`). Run from `~/job-tracker`.
+Start all three as detached containers:
 
-**Terminal A — Store:**
 ```bash
-go run ./cmd/store
-# expect: store: consuming job.submitted, job.status.changed (group=store)
+podman-compose up -d store scheduler notifier
 ```
 
-**Terminal B — Scheduler:**
+Watch the logs (one terminal per service, or combined):
 
-For real-world delays:
 ```bash
-go run ./cmd/scheduler
+podman-compose logs -f store
+podman-compose logs -f scheduler
+podman-compose logs -f notifier
+
+# or all at once:
+podman-compose logs -f store scheduler notifier
 ```
 
-For a 10-second smoke test:
+Expected startup lines:
+
+- **store:** `store: consuming job.submitted, job.status.changed (group=store)`
+- **scheduler:** `scheduler: group=scheduler, saved=168h0m0s, applied=336h0m0s, poll=30s`
+- **notifier:** `notifier: consuming job.reminder (group=notifier)`
+
+### Smoke-test timings
+
+To shorten the scheduler's delays for a smoke test, set overrides in
+`.env` (or your shell) before starting the scheduler:
+
 ```bash
-REMINDER_SAVED_SECONDS=10 REMINDER_APPLIED_SECONDS=15 REMINDER_POLL_SECONDS=2 \
-  go run ./cmd/scheduler
+cat >> .env <<'EOF'
+REMINDER_SAVED_SECONDS=10
+REMINDER_APPLIED_SECONDS=15
+REMINDER_POLL_SECONDS=2
+EOF
+
+podman-compose up -d --force-recreate scheduler
 ```
 
-Expect a startup line like:
-```
-scheduler: group=scheduler, saved=10s, applied=15s, poll=2s
-```
-
-**Terminal C — Notifier:**
-```bash
-go run ./cmd/notifier
-# expect: notifier: consuming job.reminder (group=notifier)
-```
+Startup line should now read `saved=10s, applied=15s, poll=2s`.
+Remove the lines from `.env` and recreate again to restore defaults.
 
 ---
 
 ## 5. Smoke tests
 
-Use a 4th terminal for these.
-
 ### 5a. Happy path
 
 ```bash
-go run ./cmd/cli add \
+podman-compose run --rm cli add \
   --url https://example.com/job/1 \
   --title "Senior Backend Engineer" \
   --company "Acme"
 ```
 
-Expected reactions:
+Expected reactions (watch with `podman-compose logs -f …`):
 
 - **CLI:** `published: Senior Backend Engineer @ Acme (saved)`
-- **Store (Terminal A):** `submitted: Senior Backend Engineer @ Acme (saved)`
-- **Scheduler (Terminal B):** `scheduled reminder for https://example.com/job/1 (saved)`
-- **Notifier (Terminal C):** (~10s later, with the smoke-test env)
+- **store:** `submitted: Senior Backend Engineer @ Acme (saved)`
+- **scheduler:** `scheduled reminder for https://example.com/job/1 (saved)`
+- **notifier:** (~10s later, with smoke-test env)
   `REMINDER followup_saved — Senior Backend Engineer @ Acme (saved, due ...) :: Still interested? ...`
 
 ### 5b. Status change
 
 ```bash
-go run ./cmd/cli status https://example.com/job/1 applied
+podman-compose run --rm cli status https://example.com/job/1 applied
 ```
 
 Expected:
 
-- **Store:** `status: https://example.com/job/1 → applied`
-- **Scheduler:** `reminders updated for https://example.com/job/1 (applied)`
+- **store:** `status: https://example.com/job/1 → applied`
+- **scheduler:** `reminders updated for https://example.com/job/1 (applied)`
 - The old "saved" reminder is cancelled; a new "applied" reminder is scheduled.
-- **Notifier:** within ~15s, fires the `followup_applied` reminder.
+- **notifier:** within ~15s, fires the `followup_applied` reminder.
 
 ### 5c. Terminal status (no new reminder)
 
 ```bash
-go run ./cmd/cli status https://example.com/job/1 rejected
+podman-compose run --rm cli status https://example.com/job/1 rejected
 ```
 
 Expected:
 
-- Store updates the row.
-- Scheduler cancels pending reminders, schedules nothing new.
-- Notifier stays quiet.
+- store updates the row.
+- scheduler cancels pending reminders, schedules nothing new.
+- notifier stays quiet.
 
 ### 5d. Idempotency check
 
-Stop the Store (Ctrl-C in Terminal A) and restart it:
+Restart the store container:
 
 ```bash
-go run ./cmd/store
+podman-compose restart store
+podman-compose logs -f store
 ```
 
 You'll see it consume the old events again. Each one prints
@@ -204,8 +201,16 @@ You'll see it consume the old events again. Each one prints
 
 ### Postgres
 
+From the host (if `psql` is installed):
+
 ```bash
 psql postgres://jobtracker:jobtracker@localhost:5432/jobtracker
+```
+
+Or use the container's `psql`:
+
+```bash
+podman exec -it job-tracker-postgres psql -U jobtracker -d jobtracker
 ```
 
 Useful queries:
@@ -222,11 +227,11 @@ SELECT id, url, kind, due_at FROM reminders
  ORDER BY due_at;
 ```
 
-### Kafka UI (http://localhost:8080)
+### Kafka UI (http://localhost:8088)
 
 - **Topics → job.submitted → Messages**: the JSON events you produced.
 - **Consumer Groups**: should show `store`, `scheduler`, `notifier` each with a current offset and a lag of 0 (or near 0) when caught up.
-- **Topics → job.reminder → Messages**: the reminder events the Scheduler published.
+- **Topics → job.reminder → Messages**: the reminder events the scheduler published.
 
 The two consumer groups (`store` + `scheduler`) reading the same
 two topics is the "fan-out" pattern in action — proof that consumer
@@ -236,13 +241,10 @@ groups are independent.
 
 ## 7. Stopping
 
-Stop the Go services with Ctrl-C in each terminal. They handle SIGINT.
-
-Stop the containers:
-
 ```bash
-podman-compose down            # keeps data volumes
-podman-compose down -v         # ALSO deletes Kafka logs + Postgres data
+podman-compose stop                 # stop containers, keep volumes
+podman-compose down                 # remove containers, keep volumes
+podman-compose down -v              # ALSO delete Kafka logs + Postgres data
 ```
 
 The `-v` form is the easy "reset everything" — handy while iterating.
@@ -261,20 +263,31 @@ Most common cause on a fresh boot: Kafka can't format `/var/lib/kafka/data`
 because the volume has stale data from a previous run with different
 config. Fix: `podman-compose down -v && podman-compose up -d`.
 
-### Go services hang on connect
+### App service crash-loops at startup
 
-`localhost:9092` is what they expect by default. If the services run
-*on the same machine* as the containers, that works because the
-compose file publishes port 9092 to the host.
+```bash
+podman-compose logs store
+```
 
-If you run a service inside a container later (future scope), it must
-use `kafka:29092` instead — set `KAFKA_BOOTSTRAP=kafka:29092` in that
-container's env.
+Usually one of:
+
+- Kafka or Postgres isn't healthy yet — wait for them, then
+  `podman-compose restart store scheduler notifier`.
+- The image is stale after a code change — rebuild:
+  `podman-compose build && podman-compose up -d --force-recreate`.
+
+### CLI hangs on `ensure-topics`
+
+Kafka isn't reachable from the `cli` container. Check that
+`kafka` is healthy (`podman-compose ps`) and that you're using
+the compose-defined `cli` service (which already points at
+`kafka:29092`), not a stray host invocation.
 
 ### "missing go.sum entry"
 
-You forgot to commit `go.sum` after adding a dependency on the dev
-machine. Run `go mod tidy` and commit + push.
+You changed a dependency without running `go mod tidy`. Fix it
+on your dev machine, commit `go.sum`, push, then rebuild the
+image on the server: `podman-compose build`.
 
 ### Notifier never fires
 
@@ -283,7 +296,7 @@ Three things to check, in order:
    `SELECT * FROM reminders WHERE fired_at IS NULL;`
 2. Is its `due_at` in the past?
    If not, you're just waiting. Drop `REMINDER_SAVED_SECONDS` for testing.
-3. Is the Scheduler ticking?
+3. Is the scheduler ticking?
    Its log should show `fired reminder id=... url=...` when it fires.
 
 ### "topic already exists" error on `ensure-topics`
@@ -312,13 +325,12 @@ After the first-time setup above:
 ```bash
 cd ~/job-tracker
 git pull
-podman-compose up -d        # if not already running
-go run ./cmd/store &
-go run ./cmd/scheduler &
-go run ./cmd/notifier &
-# then use the CLI as needed
+podman-compose build           # only if code changed
+podman-compose up -d           # brings up everything (infra + services)
+# then use the CLI as needed:
+podman-compose run --rm cli add --url ... --title ... --company ...
 ```
 
-Use `tmux` or systemd units to keep the three services running across
-shell sessions; both are out of scope for v1 but trivial to add when
-you find yourself wanting it.
+`restart: unless-stopped` on the app services means they survive
+reboots once the podman socket is enabled (`systemctl --user enable
+--now podman.socket`).
