@@ -8,9 +8,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -79,6 +83,34 @@ func deliver(ev events.JobReminder) {
 	}
 	log.Printf("REMINDER  %s — %s @ %s (%s, due %s) :: %s",
 		ev.Kind, ev.Title, ev.Company, ev.Status, ev.DueAt.Format(time.RFC3339), prompt)
+
+	msg := fmt.Sprintf("🔔 %s — %s @ %s\nStatus: %s\nDue: %s\n%s",
+		ev.Kind, ev.Title, ev.Company, ev.Status, ev.DueAt.Format(time.RFC3339), prompt)
+	if err := sendTelegram(msg); err != nil {
+		log.Printf("telegram: %v", err)
+	}
+}
+
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+func sendTelegram(text string) error {
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	chatID := os.Getenv("TELEGRAM_CHAT_ID")
+	if token == "" || chatID == "" {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]string{"chat_id": chatID, "text": text})
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("telegram status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 func brokers() []string {

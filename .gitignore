@@ -7,6 +7,12 @@ bin/
 *.test
 *.out
 
+# Binaries produced by `go build ./cmd/<name>` at repo root
+/notifier
+/cli
+/store
+/scheduler
+
 # Editor / OS
 .idea/
 .vscode/

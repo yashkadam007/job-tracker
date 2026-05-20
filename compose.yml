@@ -107,6 +107,8 @@ services:
     command: [notifier]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     restart: unless-stopped
     depends_on:
       kafka:
