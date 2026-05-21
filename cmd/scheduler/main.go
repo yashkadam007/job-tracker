@@ -45,9 +45,17 @@ func main() {
 	}
 	defer pool.Close()
 
+	tzName := envString("REMINDER_TZ", "Asia/Kolkata")
+	loc, err := time.LoadLocation(tzName)
+	if err != nil {
+		log.Fatalf("REMINDER_TZ=%q: %v", tzName, err)
+	}
+	snapHour := envInt("REMINDER_HOUR", 9)
 	sch := scheduler.New(pool, scheduler.Config{
 		SavedFollowup:   envDuration("REMINDER_SAVED", 7*24*time.Hour),
 		AppliedFollowup: envDuration("REMINDER_APPLIED", 14*24*time.Hour),
+		SnapHour:        snapHour,
+		Location:        loc,
 	})
 
 	cl, err := kgo.NewClient(
@@ -76,9 +84,10 @@ func main() {
 	defer prod.Close()
 
 	pollInterval := envDuration("REMINDER_POLL", 30*time.Second)
-	log.Printf("scheduler: group=%s, saved=%s, applied=%s, poll=%s",
+	log.Printf("scheduler: group=%s, saved=%s, applied=%s, poll=%s, snap=%dh %s",
 		scheduler.Consumer, envDuration("REMINDER_SAVED", 7*24*time.Hour),
-		envDuration("REMINDER_APPLIED", 14*24*time.Hour), pollInterval)
+		envDuration("REMINDER_APPLIED", 14*24*time.Hour), pollInterval,
+		snapHour, loc)
 
 	// Tick loop: independent goroutine that fires due reminders.
 	go runTicker(ctx, sch, prod, pollInterval)
@@ -228,4 +237,23 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(n) * time.Second
+}
+
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }

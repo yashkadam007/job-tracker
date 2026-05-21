@@ -18,8 +18,10 @@ import (
 const Consumer = "scheduler"
 
 type Config struct {
-	SavedFollowup   time.Duration // when status=saved, remind after this delay
-	AppliedFollowup time.Duration // when status=applied, remind after this delay
+	SavedFollowup   time.Duration  // when status=saved, remind after this delay
+	AppliedFollowup time.Duration  // when status=applied, remind after this delay
+	SnapHour        int            // hour-of-day to round reminders to. Negative = disabled.
+	Location        *time.Location // timezone for SnapHour
 }
 
 type Scheduler struct {
@@ -109,12 +111,29 @@ func (s *Scheduler) HandleStatusChanged(ctx context.Context, ev events.JobStatus
 func (s *Scheduler) dueForStatus(status events.JobStatus, anchor time.Time) (events.ReminderKind, time.Time, bool) {
 	switch status {
 	case events.StatusSaved:
-		return events.ReminderFollowupSaved, anchor.Add(s.cfg.SavedFollowup), true
+		return events.ReminderFollowupSaved, s.snap(anchor.Add(s.cfg.SavedFollowup)), true
 	case events.StatusApplied:
-		return events.ReminderFollowupApplied, anchor.Add(s.cfg.AppliedFollowup), true
+		return events.ReminderFollowupApplied, s.snap(anchor.Add(s.cfg.AppliedFollowup)), true
 	default:
 		return "", time.Time{}, false
 	}
+}
+
+// snap rounds a due time forward to the next SnapHour in cfg.Location, so
+// reminders land in the morning rather than at whatever wall-clock minute
+// the original event happened. Disabled (returns due unchanged) when
+// SnapHour is out of [0,23] or Location is nil — useful for short-delay
+// tests where snapping to 9am would delay the reminder by hours.
+func (s *Scheduler) snap(due time.Time) time.Time {
+	if s.cfg.SnapHour < 0 || s.cfg.SnapHour > 23 || s.cfg.Location == nil {
+		return due
+	}
+	local := due.In(s.cfg.Location)
+	target := time.Date(local.Year(), local.Month(), local.Day(), s.cfg.SnapHour, 0, 0, 0, s.cfg.Location)
+	if target.Before(due) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target
 }
 
 // FetchDue returns reminders whose due_at has arrived and which
