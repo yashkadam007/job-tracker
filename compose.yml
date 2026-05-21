@@ -33,6 +33,11 @@ services:
       # KRaft requires a cluster ID. Any 22-char base64 string works.
       CLUSTER_ID: job-tracker-cluster-01
 
+      # The apache/kafka image defaults KAFKA_LOG_DIRS to
+      # /tmp/kraft-combined-logs. Override so logs land on the mounted
+      # named volume below and survive container recreation.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
