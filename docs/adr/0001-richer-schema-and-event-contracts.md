@@ -213,7 +213,7 @@ it after, when three places would need to update at once.
 - `internal/scheduler` is unchanged.
 - `internal/notifier` is unchanged — the bot/TUI ADRs will decide how
   notes and interviews surface in messages.
-- `internal/jobs` (per ADR 0002) gains read/publish methods for
+- `internal/jobclient` (per ADR 0002) gains read/publish methods for
   notes and interviews when those frontends need them. Out of scope
   for this ADR.
 - Operational: `schema.sql` re-run on startup adds the new tables and
@@ -224,9 +224,9 @@ it after, when three places would need to update at once.
 
 ## Related decisions
 
-- **ADR 0002** — Shared `internal/jobs` library. Will gain Publisher
-  methods for `JobNoteAdded` and `JobInterviewRecorded`, and Reader
-  methods for notes/interviews lists.
+- **ADR 0002** — Shared `internal/jobclient` library. Will gain
+  Publisher methods for `JobNoteAdded` and `JobInterviewRecorded`,
+  and Reader methods for notes/interviews lists.
 - **ADR 0003** — Telegram bot. Depends on these schemas to render
   pipeline state and accept note/interview updates from chat.
 - **ADR 0004** — Desktop TUI. Same dependency, with richer rendering
@@ -250,8 +250,8 @@ it after, when three places would need to update at once.
 - `cmd/cli/main.go` (new flags, two new subcommands).
 - `internal/store/` (two new handlers, history-row writes on submit
   and on status change).
-- `internal/jobs/` (future: publisher/reader methods for notes and
-  interviews — out of scope for this ADR).
+- `internal/jobclient/` (future: publisher/reader methods for notes
+  and interviews — out of scope for this ADR).
 
 ## Related principles
 

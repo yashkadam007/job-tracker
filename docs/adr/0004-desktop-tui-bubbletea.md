@@ -28,8 +28,8 @@ Architecture:
   No daemon, no service to run.
 - Talks directly to the home-server's Postgres and Kafka **over
   Tailscale** (or LAN if the laptop is at home). No API tier.
-- Uses `internal/jobs.Publisher` and `internal/jobs.Reader` from ADR
-  0002 — zero duplicated transport code.
+- Uses `internal/jobclient.Publisher` and `internal/jobclient.Reader`
+  from ADR 0002 — zero duplicated transport code.
 - Stateless: each launch reads fresh state from Postgres. No local
   cache to invalidate.
 
@@ -44,8 +44,9 @@ UX shape (v1):
   `a`=applied, `r`=rejected, `o`=offer, `w`=withdrawn, `s`=snooze 1d,
   `n`=new (modal: prompts for URL/title/company), `/`=search, `q`=quit.
 - Each transition publishes a `job.status.changed` event via
-  `jobs.Publisher`. The UI then re-queries `jobs.Reader.List` to
-  reflect the new state — no optimistic UI for v1.
+  `jobclient.Publisher`. The UI then re-queries
+  `jobclient.Reader.List` to reflect the new state — no optimistic
+  UI for v1.
 
 Out of scope for v1:
 
@@ -72,7 +73,7 @@ Presentation.
   network-level access (tailnet) is sufficient.
 - v1 is desktop-only (macOS); the same binary should compile and run
   on Linux but isn't a release target.
-- `internal/jobs` (ADR 0002) is in place before this is built.
+- `internal/jobclient` (ADR 0002) is in place before this is built.
 - Triage volume is small (dozens, not thousands of saved jobs) — a
   full-table re-query after each action is fine.
 
@@ -80,8 +81,8 @@ Presentation.
 
 - Must not require a new backend service or HTTP API. Reuses existing
   Postgres + Kafka.
-- Must reuse `internal/jobs` for all read/publish operations — no
-  copy/paste of `kgo` wiring or SQL.
+- Must reuse `internal/jobclient` for all read/publish operations —
+  no copy/paste of `kgo` wiring or SQL.
 - Must respect the event-driven contract: every mutation is published
   as an event; no direct UPDATE on `jobs` from the TUI.
 - Must shut down cleanly (Bubble Tea + signal context) so the
@@ -115,8 +116,9 @@ Alternatives considered:
   architecture** for one user on a known device. No API design, no
   TLS, no DNS, no auth. The trust boundary is "you're on my
   tailnet."
-- **Reuses `internal/jobs`** — Publisher for writes (as Kafka events),
-  Reader for the list/detail/search queries. Zero duplicated code.
+- **Reuses `internal/jobclient`** — Publisher for writes (as Kafka
+  events), Reader for the list/detail/search queries. Zero duplicated
+  code.
 - **Stateless launch** means there's never a "the TUI got out of sync
   with reality" failure mode. Every render is a fresh read.
 - **Keyboard-first hotkeys** make weekly triage near-instant: one key
@@ -169,7 +171,8 @@ this is acceptable.
 - **ADR 0001** — Richer schema and event contracts. Strict
   prerequisite: the TUI reads and publishes against the redesigned
   schema and event set.
-- **ADR 0002** — Shared `internal/jobs` library. Strict prerequisite.
+- **ADR 0002** — Shared `internal/jobclient` library. Strict
+  prerequisite.
 - **ADR 0003** — Telegram bot. Covers mobile/reactive flows. The TUI
   is its desktop/proactive complement; both publish the same events.
 - **Future** — Live updates from Kafka in the TUI (consumer-side).
@@ -187,7 +190,7 @@ this is acceptable.
 ## Related artifacts
 
 - `cmd/tui/` (new)
-- `internal/jobs/` (from ADR 0002; the TUI is a primary consumer)
+- `internal/jobclient/` (from ADR 0002; the TUI is a primary consumer)
 - `compose.yml` — `KAFKA_ADVERTISED_LISTENERS` likely needs an
   additional entry (see Implications).
 - `docs/runbook.md` — should grow a "Install the TUI on your Mac"

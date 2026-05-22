@@ -145,8 +145,9 @@ follow-up, not a prerequisite.
 - **ADR 0001** — Richer schema and event contracts. Strict
   prerequisite: the bot reads and publishes against the redesigned
   schema and event set.
-- **ADR 0002** — Shared `internal/jobs` library. Strict prerequisite:
-  the bot uses `jobs.Publisher` and `jobs.Reader`.
+- **ADR 0002** — Shared `internal/jobclient` library. Strict
+  prerequisite: the bot uses `jobclient.Publisher` and
+  `jobclient.Reader`.
 - **ADR 0004** — Desktop TUI in Bubble Tea for power-user job
   management. Complements the bot on macOS; not a replacement.
 - **Future ADR** — Read API in front of Postgres if multiple non-Store

@@ -15,13 +15,10 @@
 // take `--job-id` explicitly; the CLI keeps no state and doesn't talk to
 // Postgres. URL is descriptive metadata on the job, not its identity —
 // postings rename and redirect, the job_id doesn't.
-// (ADR 0001 open question, resolved by deferral: revisit once ADR 0003
-// adds a Postgres-reading `/list` precedent the CLI could mirror.)
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +33,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"job-tracker/internal/events"
+	"job-tracker/internal/jobclient"
 )
 
 func main() {
@@ -43,19 +41,38 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	switch os.Args[1] {
-	case "add":
-		cmdAdd(os.Args[2:])
-	case "status":
-		cmdStatus(os.Args[2:])
-	case "note":
-		cmdNote(os.Args[2:])
-	case "interview":
-		cmdInterview(os.Args[2:])
-	case "ensure-topics":
+	// ensure-topics is admin-only and doesn't go through Publisher.
+	if os.Args[1] == "ensure-topics" {
 		cmdEnsureTopics()
+		return
+	}
+	switch os.Args[1] {
 	case "-h", "--help", "help":
 		usage()
+		return
+	}
+
+	// One Publisher per process, reused across every subcommand. Replaces
+	// the old per-call kgo.NewClient pattern.
+	pub, err := jobclient.NewPublisher(brokers())
+	if err != nil {
+		log.Fatalf("publisher: %v", err)
+	}
+	defer func() {
+		if err := pub.Close(); err != nil {
+			log.Printf("publisher close: %v", err)
+		}
+	}()
+
+	switch os.Args[1] {
+	case "add":
+		cmdAdd(pub, os.Args[2:])
+	case "status":
+		cmdStatus(pub, os.Args[2:])
+	case "note":
+		cmdNote(pub, os.Args[2:])
+	case "interview":
+		cmdInterview(pub, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -124,7 +141,7 @@ func cmdEnsureTopics() {
 	}
 }
 
-func cmdAdd(args []string) {
+func cmdAdd(pub *jobclient.Publisher, args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 
 	url := fs.String("url", "", "job posting URL (required)")
@@ -216,16 +233,17 @@ func cmdAdd(args []string) {
 		Priority:   intPtrIfSet(fs, "priority", *priority),
 		CustomTags: []string(customTags),
 	}
-	// Partition key = job_id. Two events for the same job land on the
-	// same partition, so Kafka preserves their order — Store will see
-	// "submitted" before any "status changed".
-	publish(events.TopicJobSubmitted, ev.JobID, ev)
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.Submit(ctx, ev); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 	fmt.Printf("published: %s @ %s (%s)\n", ev.Title, ev.Company, ev.Status)
 	fmt.Printf("job_id: %s\n", ev.JobID)
 	fmt.Println("(save this id — `status`, `note add`, and `interview …` need it.)")
 }
 
-func cmdStatus(args []string) {
+func cmdStatus(pub *jobclient.Publisher, args []string) {
 	if len(args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: jobs status <job-id> <new-status>")
 		os.Exit(2)
@@ -236,25 +254,29 @@ func cmdStatus(args []string) {
 		Status:    events.JobStatus(args[1]),
 		ChangedAt: time.Now().UTC(),
 	}
-	publish(events.TopicJobStatusChanged, ev.JobID, ev)
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.ChangeStatus(ctx, ev); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 	fmt.Printf("status changed: %s → %s\n", ev.JobID, ev.Status)
 }
 
-func cmdNote(args []string) {
+func cmdNote(pub *jobclient.Publisher, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: jobs note add --job-id <id> --body <text>")
 		os.Exit(2)
 	}
 	switch args[0] {
 	case "add":
-		cmdNoteAdd(args[1:])
+		cmdNoteAdd(pub, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown note subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
 }
 
-func cmdNoteAdd(args []string) {
+func cmdNoteAdd(pub *jobclient.Publisher, args []string) {
 	fs := flag.NewFlagSet("note add", flag.ExitOnError)
 	jobID := fs.String("job-id", "", "job id from `add` (required)")
 	body := fs.String("body", "", "note body (required)")
@@ -271,27 +293,31 @@ func cmdNoteAdd(args []string) {
 		Body:      *body,
 		CreatedAt: time.Now().UTC(),
 	}
-	publish(events.TopicJobNoteAdded, ev.JobID, ev)
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.AddNote(ctx, ev); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 	fmt.Printf("note added: %s\n", ev.JobID)
 }
 
-func cmdInterview(args []string) {
+func cmdInterview(pub *jobclient.Publisher, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: jobs interview schedule|update …")
 		os.Exit(2)
 	}
 	switch args[0] {
 	case "schedule":
-		cmdInterviewSchedule(args[1:])
+		cmdInterviewSchedule(pub, args[1:])
 	case "update":
-		cmdInterviewUpdate(args[1:])
+		cmdInterviewUpdate(pub, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown interview subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
 }
 
-func cmdInterviewSchedule(args []string) {
+func cmdInterviewSchedule(pub *jobclient.Publisher, args []string) {
 	fs := flag.NewFlagSet("interview schedule", flag.ExitOnError)
 	jobID := fs.String("job-id", "", "job id from `add` (required)")
 	round := fs.String("round", "", "phone_screen|technical|behavioral|system_design|onsite|final|other (required)")
@@ -321,13 +347,17 @@ func cmdInterviewSchedule(args []string) {
 		Notes:        *notes,
 		RecordedAt:   time.Now().UTC(),
 	}
-	publish(events.TopicJobInterviewRecorded, ev.JobID, ev)
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.RecordInterview(ctx, ev); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 	fmt.Printf("interview scheduled: %s (round=%s)\n", ev.JobID, ev.Round)
 	fmt.Printf("interview_id: %s\n", ev.InterviewID)
 	fmt.Println("(save this id — `interview update` needs it.)")
 }
 
-func cmdInterviewUpdate(args []string) {
+func cmdInterviewUpdate(pub *jobclient.Publisher, args []string) {
 	fs := flag.NewFlagSet("interview update", flag.ExitOnError)
 	interviewID := fs.String("interview-id", "", "interview id from `interview schedule` (required)")
 	jobID := fs.String("job-id", "", "job id from `add` (required; partition key)")
@@ -373,41 +403,19 @@ func cmdInterviewUpdate(args []string) {
 	if len(interviewers) > 0 {
 		ev.Interviewers = []string(interviewers)
 	}
-	publish(events.TopicJobInterviewRecorded, ev.JobID, ev)
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.RecordInterview(ctx, ev); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 	fmt.Printf("interview updated: %s\n", ev.InterviewID)
 }
 
-// publish serializes v to JSON and sends a single record synchronously.
-// RequiredAcks=AllISRAcks means the broker waits until every in-sync
-// replica has the record before acking — the strongest durability the
-// cluster can offer.
-func publish(topic, key string, v any) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		log.Fatalf("marshal: %v", err)
-	}
-
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers()...),
-		kgo.RequiredAcks(kgo.AllISRAcks()),
-		kgo.ProducerLinger(0),
-	)
-	if err != nil {
-		log.Fatalf("kafka client: %v", err)
-	}
-	defer cl.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	rec := &kgo.Record{
-		Topic: topic,
-		Key:   []byte(key),
-		Value: body,
-	}
-	if err := cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
-		log.Fatalf("publish: %v", err)
-	}
+// publishCtx is the per-call timeout for a single ProduceSync — the
+// Publisher itself is process-lived, so this only bounds an individual
+// publish round trip.
+func publishCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Second)
 }
 
 // stringSlice collects repeated --flag values into a slice.
