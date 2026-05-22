@@ -75,7 +75,7 @@ You should see one cluster ("job-tracker"), no topics yet.
 ## 3. Create topics
 
 ```bash
-podman-compose run --rm cli ensure-topics
+podman-compose run --rm --no-deps cli ensure-topics
 ```
 
 Expected output:
@@ -151,7 +151,7 @@ Remove the lines from `.env` and recreate again to restore defaults.
 ### 5a. Happy path
 
 ```bash
-podman-compose run --rm cli add \
+podman-compose run --rm --no-deps cli add \
   --url https://example.com/job/1 \
   --title "Senior Backend Engineer" \
   --company "Acme"
@@ -170,7 +170,7 @@ The bare three-flag form above still works. To exercise the richer
 metadata path, pass any of the optional flags:
 
 ```bash
-podman-compose run --rm cli add \
+podman-compose run --rm --no-deps cli add \
   --url https://example.com/job/2 \
   --title "Staff Engineer" --company "Globex" \
   --work-mode remote --seniority staff --source linkedin \
@@ -192,7 +192,7 @@ SELECT job_id, url, work_mode, seniority, tech_tags, custom_tags, priority,
 Use the `job_id` printed by `add` (URLs aren't the identity anymore):
 
 ```bash
-podman-compose run --rm cli status <job-id> applied
+podman-compose run --rm --no-deps cli status <job-id> applied
 ```
 
 Expected:
@@ -205,7 +205,7 @@ Expected:
 ### 5c. Terminal status (no new reminder)
 
 ```bash
-podman-compose run --rm cli status <job-id> rejected
+podman-compose run --rm --no-deps cli status <job-id> rejected
 ```
 
 Expected:
@@ -217,7 +217,7 @@ Expected:
 ### 5d. Note + interview pipeline
 
 ```bash
-podman-compose run --rm cli note add \
+podman-compose run --rm --no-deps cli note add \
   --job-id <job-id> \
   --body "Recruiter said they'll decide by Friday."
 ```
@@ -234,7 +234,7 @@ Then schedule and update an interview. **Save the printed `interview_id`** —
 `interview update` needs it (the CLI doesn't persist any local state).
 
 ```bash
-podman-compose run --rm cli interview schedule \
+podman-compose run --rm --no-deps cli interview schedule \
   --job-id <job-id> \
   --round phone_screen \
   --scheduled-at 2026-06-01T15:00:00Z \
@@ -242,7 +242,7 @@ podman-compose run --rm cli interview schedule \
   --notes "30 min screening"
 
 # copy interview_id from the output, then:
-podman-compose run --rm cli interview update \
+podman-compose run --rm --no-deps cli interview update \
   --interview-id <id-from-above> \
   --job-id <job-id> \
   --completed-at 2026-06-01T15:35:00Z \
@@ -791,7 +791,7 @@ git pull
 podman-compose build           # only if code changed
 podman-compose up -d           # brings up everything (infra + services)
 # then use the CLI as needed:
-podman-compose run --rm cli add --url ... --title ... --company ...
+podman-compose run --rm --no-deps cli add --url ... --title ... --company ...
 # or just talk to the bot in Telegram.
 ```
 
