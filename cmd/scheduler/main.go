@@ -133,7 +133,7 @@ func handle(ctx context.Context, sch *scheduler.Scheduler, r *kgo.Record) error 
 			return err
 		}
 		if applied {
-			log.Printf("scheduled reminder for %s (%s)", ev.URL, ev.Status)
+			log.Printf("scheduled reminder for %s (%s)", ev.JobID, ev.Status)
 		}
 	case events.TopicJobStatusChanged:
 		var ev events.JobStatusChanged
@@ -143,7 +143,7 @@ func handle(ctx context.Context, sch *scheduler.Scheduler, r *kgo.Record) error 
 		if _, err := sch.HandleStatusChanged(ctx, ev); err != nil {
 			return err
 		}
-		log.Printf("reminders updated for %s (%s)", ev.URL, ev.Status)
+		log.Printf("reminders updated for %s (%s)", ev.JobID, ev.Status)
 	default:
 		return errors.New("unknown topic: " + r.Topic)
 	}
@@ -178,6 +178,7 @@ func fireDue(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client) er
 		now := time.Now().UTC()
 		ev := events.JobReminder{
 			EventID: fmt.Sprintf("reminder-%d", d.ID),
+			JobID:   d.JobID,
 			URL:     d.URL,
 			Kind:    d.Kind,
 			DueAt:   d.DueAt,
@@ -192,7 +193,7 @@ func fireDue(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client) er
 		}
 		rec := &kgo.Record{
 			Topic: events.TopicJobReminder,
-			Key:   []byte(d.URL),
+			Key:   []byte(d.JobID),
 			Value: body,
 		}
 		publishCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -204,7 +205,7 @@ func fireDue(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client) er
 		if err := sch.MarkFired(ctx, d.ID, now); err != nil {
 			return fmt.Errorf("mark fired id=%d: %w", d.ID, err)
 		}
-		log.Printf("fired reminder id=%d url=%s kind=%s", d.ID, d.URL, d.Kind)
+		log.Printf("fired reminder id=%d job_id=%s url=%s kind=%s", d.ID, d.JobID, d.URL, d.Kind)
 	}
 	return nil
 }

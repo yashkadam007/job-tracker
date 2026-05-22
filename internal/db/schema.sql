@@ -6,7 +6,14 @@
 -- CREATE TYPE so `schema.sql` stays editable in place.
 
 CREATE TABLE IF NOT EXISTS jobs (
-    url                  text        PRIMARY KEY,
+    -- Producer-generated UUID. Stable across the job's lifetime; every
+    -- child table and every event keys off this. URL is metadata on
+    -- the job, not its identity — postings rename, redirect, and rot,
+    -- but the job_id never changes.
+    job_id               text        PRIMARY KEY,
+    -- url is still required and globally unique, but it's mutable
+    -- (rename without losing children, notes, or history).
+    url                  text        NOT NULL UNIQUE,
     title                text        NOT NULL,
     company              text        NOT NULL,
     status               text        NOT NULL
@@ -75,15 +82,15 @@ CREATE INDEX IF NOT EXISTS jobs_custom_tags_gin ON jobs USING GIN (custom_tags);
 -- constraint dedupes inside a single insert without an extra round trip.
 CREATE TABLE IF NOT EXISTS job_status_history (
     id          bigserial   PRIMARY KEY,
-    url         text        NOT NULL REFERENCES jobs(url) ON DELETE CASCADE,
+    job_id      text        NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
     status      text        NOT NULL,
     changed_at  timestamptz NOT NULL,
     event_id    text        NOT NULL UNIQUE
 );
 
 -- "Timeline for this job".
-CREATE INDEX IF NOT EXISTS job_status_history_url_idx
-    ON job_status_history (url, status, changed_at);
+CREATE INDEX IF NOT EXISTS job_status_history_job_id_idx
+    ON job_status_history (job_id, status, changed_at);
 
 -- "Conversion ratio applied → interview in last 30d" / "median time in
 -- status" — scanned by status across the global window.
@@ -95,7 +102,7 @@ CREATE INDEX IF NOT EXISTS job_status_history_status_changed_idx
 -- "schedule" event. interviewers is text[] — display only, no analytics.
 CREATE TABLE IF NOT EXISTS job_interviews (
     interview_id  text        PRIMARY KEY,
-    url           text        NOT NULL REFERENCES jobs(url) ON DELETE CASCADE,
+    job_id        text        NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
     round         text        NOT NULL
         CHECK (round IN ('phone_screen','technical','behavioral','system_design','onsite','final','other')),
     scheduled_at  timestamptz,
@@ -116,14 +123,14 @@ CREATE INDEX IF NOT EXISTS job_interviews_scheduled_idx
 -- Append-only note timeline per job. event_id UNIQUE → idempotent replays.
 CREATE TABLE IF NOT EXISTS job_notes (
     id          bigserial   PRIMARY KEY,
-    url         text        NOT NULL REFERENCES jobs(url) ON DELETE CASCADE,
+    job_id      text        NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
     body        text        NOT NULL,
     created_at  timestamptz NOT NULL,
     event_id    text        NOT NULL UNIQUE
 );
 
-CREATE INDEX IF NOT EXISTS job_notes_url_created_idx
-    ON job_notes (url, created_at);
+CREATE INDEX IF NOT EXISTS job_notes_job_id_created_idx
+    ON job_notes (job_id, created_at);
 
 -- Idempotency ledger shared by all consumers. The `consumer` column
 -- namespaces by consumer-group so each service has its own view of
@@ -139,12 +146,9 @@ CREATE TABLE IF NOT EXISTS processed_events (
 -- Scheduled future reminders. fired_at IS NULL means "not yet
 -- published to job.reminder". cancelled = true means "superseded
 -- by a status change before the reminder fired".
---
--- Shape change vs prior schema: reminders.url now has an FK with
--- ON DELETE CASCADE. Greenfield assumption — re-applied on a clean DB.
 CREATE TABLE IF NOT EXISTS reminders (
     id         bigserial   PRIMARY KEY,
-    url        text        NOT NULL REFERENCES jobs(url) ON DELETE CASCADE,
+    job_id     text        NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
     kind       text        NOT NULL,
     due_at     timestamptz NOT NULL,
     fired_at   timestamptz,

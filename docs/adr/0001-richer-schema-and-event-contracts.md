@@ -33,40 +33,55 @@ pass.
 
 **Schema, additive:**
 
+- `jobs` PK is a producer-generated `job_id` (text, UUID at the
+  producer). `url` stays on `jobs` as `NOT NULL UNIQUE` so dedup and
+  external lookup still work, but it's no longer the identity column.
+  Postings rename and redirect; `job_id` doesn't.
 - Grow `jobs` with typed columns for posting metadata, compensation,
   application details, and the personal layer (priority, custom tags).
   Tags are `text[]` with GIN indexes; enums are `text` columns with
   `CHECK (col IN (...))` constraints.
-- Add `job_status_history` — every transition with `(url, status,
+- Add `job_status_history` — every transition with `(job_id, status,
   changed_at, event_id)`. `jobs.status` becomes the denormalised cache
   of the latest row. This is the source of truth for time-based
   analytics.
 - Add `job_interviews` — 1:N child of `jobs`, keyed by a
   producer-generated `interview_id` so a later `complete` event
-  upserts the same row as the earlier `schedule` event.
-- Add `job_notes` — append-only timeline per job.
-- Add FK + `ON DELETE CASCADE` from `reminders.url` to `jobs(url)`.
-  Shape change called out: `reminders` previously had no FK.
+  upserts the same row as the earlier `schedule` event. FK to
+  `jobs(job_id)`.
+- Add `job_notes` — append-only timeline per job. FK to `jobs(job_id)`.
+- Add FK + `ON DELETE CASCADE` from `reminders.job_id` to
+  `jobs(job_id)`. Shape change called out: `reminders` previously had
+  no FK, and previously referenced `url`.
 - `processed_events` is unchanged.
 
 **Events, additive:**
 
-- `JobSubmitted` grows to carry all the new submit-time fields. Field
-  names match column names (snake_case both sides).
-- `JobStatusChanged` is unchanged.
-- New topic `job.note.added` with `JobNoteAdded`.
-- New topic `job.interview.recorded` with `JobInterviewRecorded`. One
-  topic handles both "scheduled" and "completed/updated" — the store
-  upserts on `interview_id`.
+- Every job-scoped event carries `job_id` as the identity. The CLI
+  generates it on `add` and prints it; follow-up commands take
+  `--job-id` explicitly (mirroring the existing `--interview-id`
+  pattern). `job_id` is also the Kafka partition key, so all events
+  for a given job land on the same partition in order.
+- `JobSubmitted` grows to carry `job_id` and all the new submit-time
+  fields. URL is still carried as descriptive metadata. Field names
+  match column names (snake_case both sides).
+- `JobStatusChanged` carries `job_id` (replaces `url`).
+- New topic `job.note.added` with `JobNoteAdded` keyed by `job_id`.
+- New topic `job.interview.recorded` with `JobInterviewRecorded` keyed
+  by `job_id`. One topic handles both "scheduled" and
+  "completed/updated" — the store upserts on `interview_id`.
+- `JobReminder` carries `job_id` (identity) plus `url` (denormalised
+  for the Notifier's display).
 
 Indexes are added only where an analytics query needs them: company,
 `(status, work_mode)`, `(status, first_seen_at)`, GIN on each tag
-array, `(url, status, changed_at)` and `(status, changed_at)` on the
-history table, partial index on `job_interviews.scheduled_at`.
+array, `(job_id, status, changed_at)` and `(status, changed_at)` on
+the history table, partial index on `job_interviews.scheduled_at`.
+`jobs.url UNIQUE` gives a free btree index for URL-based dedup.
 
 ## Status
 
-Proposed.
+Implemented.
 
 ## Group
 
@@ -96,15 +111,18 @@ Foundational / Schema and contracts.
   `schema.sql` idempotent and editable.
 - Multi-valued fields use `text[]` *or* a join table, picked per field
   with a justification (see Notes).
-- Every child-table reference to `jobs(url)` is a real foreign key with
-  `ON DELETE CASCADE` unless there's a reason otherwise.
+- Job identity is `job_id` (producer-generated text/UUID), not `url`.
+  Every child-table reference to `jobs(job_id)` is a real foreign key
+  with `ON DELETE CASCADE` unless there's a reason otherwise. URL
+  stays as `NOT NULL UNIQUE` on `jobs` for external lookup and dedup.
 - Every new index is justified by a named analytics query.
 - At most two new event topics. Both are justified below; no more are
   added.
 - Event field names match Postgres column names.
 - Event payloads describe what happened, never what should happen next.
 - `processed_events` and `reminders` shape changes are explicitly
-  called out (only `reminders` changes — gains an FK).
+  called out: `reminders` gains an FK and now references `job_id`
+  instead of `url`.
 
 ## Positions
 
@@ -134,6 +152,14 @@ Alternatives considered:
    Rejected — both events carry the same payload shape and converge
    on the same row. A single upsert topic keyed by `interview_id` is
    simpler for both producer and consumer.
+7. **Keep `url` as the primary key of `jobs`.** Rejected — URLs
+   rename (recruiter portals rotate IDs, postings move domains,
+   query-param normalisation drifts) and that movement would
+   cascade through every child table and every event payload. A
+   producer-generated `job_id` is stable for the job's lifetime;
+   URL becomes a `NOT NULL UNIQUE` column that can be updated in
+   place without losing notes, interviews, history, or pending
+   reminders.
 
 ## Argument
 
@@ -269,16 +295,34 @@ it after, when three places would need to update at once.
   not `bigserial`.** This makes upsert-on-id natural and avoids a
   lookup-by-(url, round, scheduled_at) heuristic when "complete the
   interview" arrives separately from "schedule the interview".
+- **`jobs.job_id` is producer-generated text (UUID), not
+  `bigserial`.** Same reasoning as `interview_id`: the producer
+  decides the id at the moment of creation, the CLI prints it, and
+  follow-up commands quote it back. A `bigserial` PK would force a
+  round-trip to Postgres on `add` just to learn the id, which
+  contradicts the "CLI doesn't talk to Postgres" property. The cost
+  is a slightly longer key on disk; the win is that the producer
+  and every subsequent event already know the id without a lookup.
+- **`jobs.url` is `NOT NULL UNIQUE`, not nullable.** Every job in
+  v1 has a URL; nullability would only earn its keep if "no URL"
+  postings became common (recruiter-only leads, say). Easy to relax
+  later if that workflow shows up. The UNIQUE constraint preserves
+  the existing dedup behaviour at submit time — a re-submit with
+  the same URL but a different `job_id` will fail loudly rather
+  than silently creating a duplicate job.
 - **No `job.edited` event yet.** Most posting metadata is captured
   at submit time and changes rarely. If it becomes a frequent
   workflow, add `JobEdited` later as a sparse-field event the store
-  applies as `UPDATE ... SET col = COALESCE($n, col)`. Speculative
-  now.
-- **Open question:** how should `cli interview update` discover the
-  `interview_id`? Options: (a) local file cache written by `cli
-  interview schedule`; (b) `cli` reads Postgres directly. (b)
-  matches the bot's `/list` precedent in ADR 0003. Decide before
-  implementing the subcommand.
+  applies as `UPDATE ... SET col = COALESCE($n, col)` — and that
+  same event is the natural carrier for a URL rename, which is the
+  main reason `url` is mutable in the new schema. Speculative now.
+- **Open question:** how should `cli` discover ids (`job_id`,
+  `interview_id`) for follow-up commands? v1 answer: print them on
+  the creating command and require the user to quote them back. The
+  longer-term options remain (a) local file cache written by the
+  creating command; (b) `cli` reads Postgres directly. (b) matches
+  the bot's `/list` precedent in ADR 0003. Revisit when either
+  frontend lands.
 - **Open question:** "ended in rejected" in the conversion metric is
   modelled as "a `rejected` transition exists after the `interview`
   transition." If the user prefers "current status is `rejected`,"

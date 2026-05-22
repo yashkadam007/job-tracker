@@ -152,9 +152,10 @@ podman-compose run --rm cli add \
 
 Expected reactions (watch with `podman-compose logs -f …`):
 
-- **CLI:** `published: Senior Backend Engineer @ Acme (saved)`
+- **CLI:** `published: Senior Backend Engineer @ Acme (saved)` then
+  `job_id: <uuid>` (save this — every follow-up command needs it).
 - **store:** `submitted: Senior Backend Engineer @ Acme (saved)`
-- **scheduler:** `scheduled reminder for https://example.com/job/1 (saved)`
+- **scheduler:** `scheduled reminder for <job_id> (saved)`
 - **notifier:** (~10s later, with smoke-test env)
   `REMINDER followup_saved — Senior Backend Engineer @ Acme (saved, due ...) :: Still interested? ...`
 
@@ -174,28 +175,30 @@ podman-compose run --rm cli add \
 Inspect the row to confirm the typed columns + arrays landed:
 
 ```sql
-SELECT url, work_mode, seniority, tech_tags, custom_tags, priority,
+SELECT job_id, url, work_mode, seniority, tech_tags, custom_tags, priority,
        comp_min, comp_max, comp_currency
   FROM jobs WHERE url = 'https://example.com/job/2';
 ```
 
 ### 5b. Status change
 
+Use the `job_id` printed by `add` (URLs aren't the identity anymore):
+
 ```bash
-podman-compose run --rm cli status https://example.com/job/1 applied
+podman-compose run --rm cli status <job-id> applied
 ```
 
 Expected:
 
-- **store:** `status: https://example.com/job/1 → applied`
-- **scheduler:** `reminders updated for https://example.com/job/1 (applied)`
+- **store:** `status: <job-id> → applied`
+- **scheduler:** `reminders updated for <job-id> (applied)`
 - The old "saved" reminder is cancelled; a new "applied" reminder is scheduled.
 - **notifier:** within ~15s, fires the `followup_applied` reminder.
 
 ### 5c. Terminal status (no new reminder)
 
 ```bash
-podman-compose run --rm cli status https://example.com/job/1 rejected
+podman-compose run --rm cli status <job-id> rejected
 ```
 
 Expected:
@@ -208,15 +211,15 @@ Expected:
 
 ```bash
 podman-compose run --rm cli note add \
-  --url https://example.com/job/1 \
+  --job-id <job-id> \
   --body "Recruiter said they'll decide by Friday."
 ```
 
-Expected store log: `note: added for https://example.com/job/1`.
+Expected store log: `note: added for <job-id>`.
 Verify the row:
 
 ```sql
-SELECT url, body, created_at FROM job_notes
+SELECT job_id, body, created_at FROM job_notes
  ORDER BY created_at DESC LIMIT 5;
 ```
 
@@ -225,7 +228,7 @@ Then schedule and update an interview. **Save the printed `interview_id`** —
 
 ```bash
 podman-compose run --rm cli interview schedule \
-  --url https://example.com/job/1 \
+  --job-id <job-id> \
   --round phone_screen \
   --scheduled-at 2026-06-01T15:00:00Z \
   --interviewer "Alex" --interviewer "Sam" \
@@ -234,7 +237,7 @@ podman-compose run --rm cli interview schedule \
 # copy interview_id from the output, then:
 podman-compose run --rm cli interview update \
   --interview-id <id-from-above> \
-  --url https://example.com/job/1 \
+  --job-id <job-id> \
   --completed-at 2026-06-01T15:35:00Z \
   --outcome passed
 ```
@@ -243,7 +246,7 @@ Verify the upsert merged the two events (round + interviewers from
 schedule, completed_at + outcome from update — neither got wiped):
 
 ```sql
-SELECT interview_id, round, scheduled_at, completed_at, outcome, interviewers
+SELECT interview_id, job_id, round, scheduled_at, completed_at, outcome, interviewers
   FROM job_interviews ORDER BY updated_at DESC LIMIT 5;
 ```
 
@@ -251,7 +254,7 @@ Status transitions also leave a trail now — every `cli status …` writes
 to `job_status_history`:
 
 ```sql
-SELECT url, status, changed_at FROM job_status_history
+SELECT job_id, status, changed_at FROM job_status_history
  ORDER BY changed_at;
 ```
 
@@ -296,22 +299,25 @@ SELECT * FROM reminders ORDER BY id DESC LIMIT 10;
 SELECT consumer, count(*) FROM processed_events GROUP BY consumer;
 
 -- "what's about to fire?"
-SELECT id, url, kind, due_at FROM reminders
- WHERE fired_at IS NULL AND NOT cancelled
- ORDER BY due_at;
+SELECT r.id, r.job_id, j.url, r.kind, r.due_at
+  FROM reminders r JOIN jobs j ON j.job_id = r.job_id
+ WHERE r.fired_at IS NULL AND NOT r.cancelled
+ ORDER BY r.due_at;
 
 -- transitions over time (source of truth for time-based analytics)
-SELECT url, status, changed_at FROM job_status_history
+SELECT job_id, status, changed_at FROM job_status_history
  ORDER BY changed_at DESC LIMIT 20;
 
 -- pipeline state per job
-SELECT url, round, scheduled_at, completed_at, outcome
+SELECT job_id, round, scheduled_at, completed_at, outcome
   FROM job_interviews ORDER BY scheduled_at DESC NULLS LAST LIMIT 20;
 
--- notes timeline for one job
-SELECT created_at, body FROM job_notes
- WHERE url = 'https://example.com/job/1'
- ORDER BY created_at;
+-- notes timeline for one job (resolve URL → job_id first if you only
+-- have the URL)
+SELECT n.created_at, n.body
+  FROM job_notes n JOIN jobs j ON j.job_id = n.job_id
+ WHERE j.url = 'https://example.com/job/1'
+ ORDER BY n.created_at;
 ```
 
 ### Kafka UI (http://localhost:8088)
@@ -384,7 +390,8 @@ Three things to check, in order:
 2. Is its `due_at` in the past?
    If not, you're just waiting. Drop `REMINDER_SAVED_SECONDS` for testing.
 3. Is the scheduler ticking?
-   Its log should show `fired reminder id=... url=...` when it fires.
+   Its log should show `fired reminder id=... job_id=... url=... kind=...`
+   when it fires.
 
 ### "topic already exists" error on `ensure-topics`
 
@@ -392,10 +399,11 @@ That's expected behaviour, printed as `exists: <topic>`. Not an error.
 
 ### `reminders` won't create on an old DB volume
 
-The schema now declares `reminders.url REFERENCES jobs(url)`. `CREATE
-TABLE IF NOT EXISTS` is a no-op against a pre-existing `reminders`
-table that lacks the FK, so the new constraint silently doesn't land.
-This is greenfield (per ADR 0001) — wipe and recreate:
+The schema now declares `reminders.job_id REFERENCES jobs(job_id)`.
+`CREATE TABLE IF NOT EXISTS` is a no-op against a pre-existing
+`reminders` table that lacks the FK (or that still keys on `url`),
+so the new shape silently doesn't land. This is greenfield (per
+ADR 0001) — wipe and recreate:
 `podman-compose down -v && podman-compose up -d`.
 
 ### Want to clear a single consumer group's offset?

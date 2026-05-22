@@ -116,9 +116,9 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 		case !applied:
 			log.Printf("status: dup event_id=%s skipped", ev.EventID)
 		case missing:
-			log.Printf("status: no job for url=%s (status event before submit?)", ev.URL)
+			log.Printf("status: no job for job_id=%s (status event before submit?)", ev.JobID)
 		default:
-			log.Printf("status: %s → %s", ev.URL, ev.Status)
+			log.Printf("status: %s → %s", ev.JobID, ev.Status)
 		}
 	case events.TopicJobNoteAdded:
 		var ev events.JobNoteAdded
@@ -133,9 +133,9 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 		case !applied:
 			log.Printf("note: dup event_id=%s skipped", ev.EventID)
 		case missing:
-			log.Printf("note: no job for url=%s (note before submit?)", ev.URL)
+			log.Printf("note: no job for job_id=%s (note before submit?)", ev.JobID)
 		default:
-			log.Printf("note: added for %s", ev.URL)
+			log.Printf("note: added for %s", ev.JobID)
 		}
 	case events.TopicJobInterviewRecorded:
 		var ev events.JobInterviewRecorded
@@ -150,9 +150,9 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 		case !applied:
 			log.Printf("interview: dup event_id=%s skipped", ev.EventID)
 		case missing:
-			log.Printf("interview: no job for url=%s (interview before submit?)", ev.URL)
+			log.Printf("interview: no job for job_id=%s (interview before submit?)", ev.JobID)
 		default:
-			log.Printf("interview: %s url=%s", ev.InterviewID, ev.URL)
+			log.Printf("interview: %s job_id=%s", ev.InterviewID, ev.JobID)
 		}
 	default:
 		return errors.New("unknown topic: " + r.Topic)

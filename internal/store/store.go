@@ -63,21 +63,22 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 
 	_, err = tx.Exec(ctx, `
         INSERT INTO jobs (
-            url, title, company, status, first_seen_at, last_event_at,
+            job_id, url, title, company, status, first_seen_at, last_event_at,
             work_mode, location, seniority, source, tech_tags, description, deadline,
             comp_min, comp_max, comp_currency, comp_equity, comp_bonus,
             resume_version, cover_letter_version, referral,
             recruiter_name, recruiter_email, recruiter_phone,
             priority, custom_tags
         ) VALUES (
-            $1, $2, $3, $4, $5, $5,
-            $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17,
-            $18, $19, $20,
-            $21, $22, $23,
-            $24, $25
+            $1, $2, $3, $4, $5, $6, $6,
+            $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18,
+            $19, $20, $21,
+            $22, $23, $24,
+            $25, $26
         )
-        ON CONFLICT (url) DO UPDATE SET
+        ON CONFLICT (job_id) DO UPDATE SET
+            url                  = EXCLUDED.url,
             title                = EXCLUDED.title,
             company              = EXCLUDED.company,
             status               = EXCLUDED.status,
@@ -103,7 +104,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
             priority             = EXCLUDED.priority,
             custom_tags          = EXCLUDED.custom_tags
     `,
-		ev.URL, ev.Title, ev.Company, string(ev.Status), ev.SubmittedAt,
+		ev.JobID, ev.URL, ev.Title, ev.Company, string(ev.Status), ev.SubmittedAt,
 		nullableEnum(string(ev.WorkMode)), nullableStr(ev.Location),
 		nullableEnum(string(ev.Seniority)), nullableEnum(string(ev.Source)),
 		techTags, nullableStr(ev.Description), ev.Deadline,
@@ -120,10 +121,10 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 	// Initial status-history row. event_id UNIQUE makes the replay path
 	// a single no-op insert (no second round trip needed).
 	if _, err := tx.Exec(ctx, `
-        INSERT INTO job_status_history (url, status, changed_at, event_id)
+        INSERT INTO job_status_history (job_id, status, changed_at, event_id)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
-    `, ev.URL, string(ev.Status), ev.SubmittedAt, ev.EventID); err != nil {
+    `, ev.JobID, string(ev.Status), ev.SubmittedAt, ev.EventID); err != nil {
 		return false, err
 	}
 
@@ -131,7 +132,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 }
 
 // ApplyStatusChanged updates the status of an existing job and appends
-// a history row. missing=true means the URL wasn't in the table
+// a history row. missing=true means the job_id wasn't in the table
 // (status arrived before submit).
 func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
@@ -151,8 +152,8 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
         UPDATE jobs
            SET status        = $2,
                last_event_at = $3
-         WHERE url = $1
-    `, ev.URL, string(ev.Status), ev.ChangedAt)
+         WHERE job_id = $1
+    `, ev.JobID, string(ev.Status), ev.ChangedAt)
 	if err != nil {
 		return false, false, err
 	}
@@ -163,10 +164,10 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
 	}
 
 	if _, err := tx.Exec(ctx, `
-        INSERT INTO job_status_history (url, status, changed_at, event_id)
+        INSERT INTO job_status_history (job_id, status, changed_at, event_id)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
-    `, ev.URL, string(ev.Status), ev.ChangedAt, ev.EventID); err != nil {
+    `, ev.JobID, string(ev.Status), ev.ChangedAt, ev.EventID); err != nil {
 		return false, false, err
 	}
 
@@ -174,7 +175,7 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
 }
 
 // ApplyNoteAdded appends a note to a job's timeline. missing=true if
-// the URL doesn't exist in jobs.
+// the job_id doesn't exist in jobs.
 func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -190,7 +191,7 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
 	}
 
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE url = $1)`, ev.URL).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE job_id = $1)`, ev.JobID).Scan(&exists); err != nil {
 		return false, false, err
 	}
 	if !exists {
@@ -198,10 +199,10 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
 	}
 
 	if _, err := tx.Exec(ctx, `
-        INSERT INTO job_notes (url, body, created_at, event_id)
+        INSERT INTO job_notes (job_id, body, created_at, event_id)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
-    `, ev.URL, ev.Body, ev.CreatedAt, ev.EventID); err != nil {
+    `, ev.JobID, ev.Body, ev.CreatedAt, ev.EventID); err != nil {
 		return false, false, err
 	}
 	return true, false, tx.Commit(ctx)
@@ -211,7 +212,7 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
 // Uses COALESCE on the partial-update path so a follow-up event that
 // only sets, say, completed_at and outcome doesn't wipe round/
 // scheduled_at/interviewers from the schedule event that preceded it.
-// missing=true if the URL doesn't exist in jobs.
+// missing=true if the job_id doesn't exist in jobs.
 func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobInterviewRecorded) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -227,7 +228,7 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 	}
 
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE url = $1)`, ev.URL).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE job_id = $1)`, ev.JobID).Scan(&exists); err != nil {
 		return false, false, err
 	}
 	if !exists {
@@ -244,7 +245,7 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 
 	if _, err := tx.Exec(ctx, `
         INSERT INTO job_interviews (
-            interview_id, url, round, scheduled_at, completed_at, outcome, interviewers, notes, updated_at
+            interview_id, job_id, round, scheduled_at, completed_at, outcome, interviewers, notes, updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, COALESCE($7, '{}'::text[]), $8, now()
         )
@@ -257,7 +258,7 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
             notes        = COALESCE(EXCLUDED.notes,        job_interviews.notes),
             updated_at   = now()
     `,
-		ev.InterviewID, ev.URL,
+		ev.InterviewID, ev.JobID,
 		nullableEnum(string(ev.Round)),
 		ev.ScheduledAt, ev.CompletedAt,
 		nullableEnum(string(ev.Outcome)),

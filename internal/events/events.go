@@ -4,6 +4,10 @@
 //
 // Two rules: field names match Postgres column names (snake_case both
 // sides), and payloads describe what happened — never what to do next.
+//
+// Job identity is `job_id` (producer-generated UUID), not URL. URLs
+// rename, redirect, and rot; the job_id is stable for the job's
+// lifetime and is the partition key on every job-scoped topic.
 package events
 
 import "time"
@@ -83,11 +87,12 @@ const (
 )
 
 // JobSubmitted is published when a job is first added to the tracker.
-// All metadata fields are optional — only URL/title/company/status are
-// required at submit time. Optional fields use omitempty so terse
+// All metadata fields are optional — only JobID/URL/Title/Company/Status
+// are required at submit time. Optional fields use omitempty so terse
 // submits stay terse on the wire.
 type JobSubmitted struct {
 	EventID     string    `json:"event_id"`
+	JobID       string    `json:"job_id"`
 	URL         string    `json:"url"`
 	Title       string    `json:"title"`
 	Company     string    `json:"company"`
@@ -127,7 +132,7 @@ type JobSubmitted struct {
 // (e.g. saved → applied).
 type JobStatusChanged struct {
 	EventID   string    `json:"event_id"`
-	URL       string    `json:"url"`
+	JobID     string    `json:"job_id"`
 	Status    JobStatus `json:"status"`
 	ChangedAt time.Time `json:"changed_at"`
 }
@@ -136,7 +141,7 @@ type JobStatusChanged struct {
 // is no edit or delete event for v1.
 type JobNoteAdded struct {
 	EventID   string    `json:"event_id"`
-	URL       string    `json:"url"`
+	JobID     string    `json:"job_id"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -151,7 +156,7 @@ type JobNoteAdded struct {
 type JobInterviewRecorded struct {
 	EventID      string            `json:"event_id"`
 	InterviewID  string            `json:"interview_id"`
-	URL          string            `json:"url"`
+	JobID        string            `json:"job_id"`
 	Round        InterviewRound    `json:"round,omitempty"`
 	ScheduledAt  *time.Time        `json:"scheduled_at,omitempty"`
 	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
@@ -174,8 +179,12 @@ const (
 // reminder comes due. EventID is deterministic ("reminder-<row id>")
 // so a crash-and-replay between publish and mark-as-fired turns into
 // a duplicate the Notifier safely ignores.
+//
+// URL is carried as descriptive metadata for the Notifier's display
+// (it's denormalised from jobs.url at fetch time); identity is JobID.
 type JobReminder struct {
 	EventID  string       `json:"event_id"`
+	JobID    string       `json:"job_id"`
 	URL      string       `json:"url"`
 	Kind     ReminderKind `json:"kind"`
 	DueAt    time.Time    `json:"due_at"`

@@ -37,6 +37,7 @@ func New(pool *pgxpool.Pool, cfg Config) *Scheduler {
 // originating job so the published event can carry context.
 type DueReminder struct {
 	ID      int64
+	JobID   string
 	URL     string
 	Kind    events.ReminderKind
 	DueAt   time.Time
@@ -65,8 +66,8 @@ func (s *Scheduler) HandleSubmitted(ctx context.Context, ev events.JobSubmitted)
 	}
 	if kind, due, ok := s.dueForStatus(ev.Status, ev.SubmittedAt); ok {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO reminders (url, kind, due_at) VALUES ($1, $2, $3)`,
-			ev.URL, string(kind), due); err != nil {
+			`INSERT INTO reminders (job_id, kind, due_at) VALUES ($1, $2, $3)`,
+			ev.JobID, string(kind), due); err != nil {
 			return false, err
 		}
 	}
@@ -74,7 +75,7 @@ func (s *Scheduler) HandleSubmitted(ctx context.Context, ev events.JobSubmitted)
 }
 
 // HandleStatusChanged reacts to a status change: cancel any pending
-// reminders for the URL (the old ones don't apply anymore) and
+// reminders for the job (the old ones don't apply anymore) and
 // schedule a new one if the new status warrants it.
 func (s *Scheduler) HandleStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, err error) {
 	tx, err := s.pool.Begin(ctx)
@@ -91,14 +92,14 @@ func (s *Scheduler) HandleStatusChanged(ctx context.Context, ev events.JobStatus
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE reminders SET cancelled = true
-           WHERE url = $1 AND fired_at IS NULL AND NOT cancelled`,
-		ev.URL); err != nil {
+           WHERE job_id = $1 AND fired_at IS NULL AND NOT cancelled`,
+		ev.JobID); err != nil {
 		return false, err
 	}
 	if kind, due, ok := s.dueForStatus(ev.Status, ev.ChangedAt); ok {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO reminders (url, kind, due_at) VALUES ($1, $2, $3)`,
-			ev.URL, string(kind), due); err != nil {
+			`INSERT INTO reminders (job_id, kind, due_at) VALUES ($1, $2, $3)`,
+			ev.JobID, string(kind), due); err != nil {
 			return false, err
 		}
 	}
@@ -142,9 +143,9 @@ func (s *Scheduler) snap(due time.Time) time.Time {
 // in v1, but cheap to support) can split the work without overlap.
 func (s *Scheduler) FetchDue(ctx context.Context, now time.Time, limit int) ([]DueReminder, error) {
 	rows, err := s.pool.Query(ctx, `
-        SELECT r.id, r.url, r.kind, r.due_at, j.title, j.company, j.status
+        SELECT r.id, r.job_id, j.url, r.kind, r.due_at, j.title, j.company, j.status
           FROM reminders r
-          JOIN jobs j ON j.url = r.url
+          JOIN jobs j ON j.job_id = r.job_id
          WHERE r.fired_at IS NULL
            AND NOT r.cancelled
            AND r.due_at <= $1
@@ -160,7 +161,7 @@ func (s *Scheduler) FetchDue(ctx context.Context, now time.Time, limit int) ([]D
 	for rows.Next() {
 		var d DueReminder
 		var kind, status string
-		if err := rows.Scan(&d.ID, &d.URL, &kind, &d.DueAt, &d.Title, &d.Company, &status); err != nil {
+		if err := rows.Scan(&d.ID, &d.JobID, &d.URL, &kind, &d.DueAt, &d.Title, &d.Company, &status); err != nil {
 			return nil, err
 		}
 		d.Kind = events.ReminderKind(kind)

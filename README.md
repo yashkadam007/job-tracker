@@ -73,7 +73,8 @@ go run ./cmd/notifier                         # leave running
 
 # in a 4th terminal:
 go run ./cmd/cli add --url <u> --title <t> --company <c>
-go run ./cmd/cli status <url> applied
+# `add` prints a job_id — quote it back for follow-up commands:
+go run ./cmd/cli status <job-id> applied
 ```
 
 For a fast end-to-end smoke test of reminders without waiting 7 days,
