@@ -119,6 +119,22 @@ services:
       kafka:
         condition: service_healthy
 
+  bot:
+    build: .
+    container_name: job-tracker-bot
+    command: [bot]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      DATABASE_URL: postgres://jobtracker:jobtracker@postgres:5432/jobtracker?sslmode=disable
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   cli:
     build: .
     entrypoint: [cli]

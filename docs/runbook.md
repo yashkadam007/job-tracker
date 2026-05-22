@@ -39,9 +39,9 @@ cd ~/job-tracker
 podman-compose build
 ```
 
-The build step compiles all four binaries (`cli`, `store`, `scheduler`,
-`notifier`) into a single image and takes ~1–2 minutes on first run.
-Subsequent builds are cached.
+The build step compiles all five binaries (`cli`, `store`, `scheduler`,
+`notifier`, `bot`) into a single image and takes ~1–2 minutes on first
+run. Subsequent builds are cached.
 
 ---
 
@@ -96,11 +96,16 @@ In Kafka UI → Topics, you should now see all five.
 
 ## 4. Run the services
 
-Start all three as detached containers:
+Start all four as detached containers:
 
 ```bash
-podman-compose up -d store scheduler notifier
+podman-compose up -d store scheduler notifier bot
 ```
+
+> The `bot` service needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+> in your env (or `.env`). It will crash-loop without them. See §10
+> for how to obtain both, or skip `bot` from the list above if you're
+> only testing the CLI pipeline.
 
 Watch the logs (one terminal per service, or combined):
 
@@ -108,9 +113,10 @@ Watch the logs (one terminal per service, or combined):
 podman-compose logs -f store
 podman-compose logs -f scheduler
 podman-compose logs -f notifier
+podman-compose logs -f bot
 
 # or all at once:
-podman-compose logs -f store scheduler notifier
+podman-compose logs -f store scheduler notifier bot
 ```
 
 Expected startup lines:
@@ -118,6 +124,7 @@ Expected startup lines:
 - **store:** `store: consuming job.submitted, job.status.changed, job.note.added, job.interview.recorded (group=store)`
 - **scheduler:** `scheduler: group=scheduler, saved=168h0m0s, applied=336h0m0s, poll=30s`
 - **notifier:** `notifier: consuming job.reminder (group=notifier)`
+- **bot:** `bot: long-polling Telegram (chat_id=<id>, timeout=25s)`
 
 ### Smoke-test timings
 
@@ -421,7 +428,181 @@ idempotency works end-to-end.
 
 ---
 
-## 9. Day-to-day
+## 9. Telegram bot — end-to-end
+
+The `bot` service (ADR 0003) gives you a Telegram chat that captures
+jobs (`/add <url>`), lists them (`/list`), and lets you tap inline
+buttons on reminders to mark them Applied / Rejected / Snoozed.
+
+### 9a. One-time: create the bot and find your chat ID
+
+1. **Create the bot.** Message [@BotFather](https://t.me/BotFather) →
+   `/newbot` → follow prompts. Save the token (looks like
+   `123456789:AAExampleTokenFromBotFather`).
+2. **Send your bot any message** (e.g. `hi`). The bot won't reply yet,
+   but Telegram now has an `update` queued for it.
+3. **Find your chat ID.** From your laptop:
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
+   ```
+   Look for `"chat":{"id":123456789,...}` in the JSON. That number is
+   your `TELEGRAM_CHAT_ID`. (For DMs it's positive; for groups it's
+   negative — both work.)
+
+### 9b. Put the credentials in `.env`
+
+```bash
+cat >> .env <<'EOF'
+TELEGRAM_BOT_TOKEN=123456789:AAExampleTokenFromBotFather
+TELEGRAM_CHAT_ID=123456789
+EOF
+
+podman-compose up -d --force-recreate notifier bot
+```
+
+Both services read the same two env vars — notifier uses them to send
+reminders (now with inline buttons), bot uses them to receive replies
+and callbacks.
+
+`bot`'s startup log should show:
+
+```
+bot: long-polling Telegram (chat_id=123456789, timeout=25s)
+```
+
+If it logs `TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required`,
+the env vars didn't land — double-check `.env` and re-run with
+`--force-recreate`.
+
+### 9c. `/add` — capture a job from a URL
+
+In your Telegram chat with the bot:
+
+```
+/add https://example.com/job/42
+```
+
+Expected: the bot replies `Fetching … ` and then either:
+- **All metadata extracted:** `Saved: Senior Backend Engineer @ Acme … job_id: <uuid>`
+- **Missing title:** `What's the job title?` — your next plain message becomes the title.
+- **Then missing company:** `Which company?` — your next plain message becomes the company.
+
+Once both are filled in, the bot publishes `job.submitted`. Verify:
+
+```bash
+podman-compose logs --tail=20 store     # submitted: <title> @ <company> (saved)
+podman-compose logs --tail=20 scheduler # scheduled reminder for <job_id> (saved)
+```
+
+```sql
+SELECT job_id, url, title, company, status FROM jobs ORDER BY first_seen_at DESC LIMIT 5;
+```
+
+> Sending any `/`-command while a `/add` is mid-flow cancels the
+> pending prompt — useful if you want to bail out.
+
+### 9d. `/list` and numeric shortcuts
+
+```
+/list
+```
+
+Bot replies with a numbered list of the last 20 jobs:
+
+```
+1. Senior Backend Engineer @ Acme (saved)
+   https://example.com/job/42
+2. Staff Engineer @ Globex (applied)
+   https://example.com/job/2
+…
+```
+
+Numbering is in-memory per chat. Mark job 1 as applied:
+
+```
+/applied 1
+```
+
+Bot replies `Senior Backend Engineer @ Acme → applied`. Verify the
+status change landed:
+
+```bash
+podman-compose logs --tail=10 store     # status: <job_id> → applied
+```
+
+Same shape: `/rejected <n>` and `/offer <n>`. Filter by status:
+
+```
+/list saved
+```
+
+> The list expires on the *next* `/list` — there's no durable
+> numbering across restarts. Re-run `/list` if you've lost your place.
+
+### 9e. Reminder buttons — Applied / Rejected / Snooze 1d
+
+Shorten the reminder delays (§4 "Smoke-test timings") so you don't
+have to wait a week, then add a fresh job:
+
+```
+/add https://example.com/job/buttons
+```
+
+After `REMINDER_SAVED_SECONDS` elapses, the notifier sends a reminder
+message to the same chat — but now with three inline buttons:
+
+```
+🔔 followup_saved — <title> @ <company>
+Status: saved
+Due: ...
+[✅ Applied] [❌ Rejected] [💤 Snooze 1d]
+```
+
+- **Tap ✅ Applied:** bot publishes `job.status.changed` (→ applied),
+  scheduler cancels old reminders and schedules a `followup_applied`
+  one. Bot replies `✓ job <id> → applied`.
+- **Tap ❌ Rejected:** same flow → status=rejected, no new reminder.
+- **Tap 💤 Snooze 1d:** bot inserts a fresh `followup_saved`
+  reminder one day out (the bot's one direct DB write — by design,
+  per ADR 0003). Bot replies `💤 job <id> — snoozed 1d`.
+
+Verify a snooze actually scheduled a new reminder:
+
+```sql
+SELECT id, job_id, kind, due_at, fired_at, cancelled
+  FROM reminders ORDER BY id DESC LIMIT 5;
+```
+
+### 9f. Other-chat rejection (security smoke test)
+
+The bot only accepts messages from the configured `TELEGRAM_CHAT_ID`.
+If you DM the bot from a *different* Telegram account, **nothing
+happens** — no reply, no log line beyond the bare `getUpdates` poll.
+That's the chat-ID allowlist in action; it's the bot's only auth.
+
+### 9g. Idempotency check (bot)
+
+Restart the bot to force Telegram to redeliver any unconfirmed
+updates:
+
+```bash
+podman-compose restart bot
+podman-compose logs -f bot
+```
+
+Updates you'd already handled before the restart get dropped silently
+(matched against `processed_events` with `consumer='bot'`,
+`event_id='tg-update-<update_id>'`). To eyeball the ledger:
+
+```sql
+SELECT consumer, count(*) FROM processed_events GROUP BY consumer;
+-- expect a row with consumer='bot' equal to the number of Telegram
+-- updates you've sent the bot.
+```
+
+---
+
+## 10. Day-to-day
 
 After the first-time setup above:
 
@@ -432,6 +613,7 @@ podman-compose build           # only if code changed
 podman-compose up -d           # brings up everything (infra + services)
 # then use the CLI as needed:
 podman-compose run --rm cli add --url ... --title ... --company ...
+# or just talk to the bot in Telegram.
 ```
 
 `restart: unless-stopped` on the app services means they survive

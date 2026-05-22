@@ -13,8 +13,9 @@ purpose of the system.
 
 ## Decision
 
-Add a two-way Telegram interface. The bot lives in the existing notifier
-service (or a sibling `bot` service if isolation is preferred later) and:
+Add a two-way Telegram interface. The bot runs as a new standalone `bot`
+service, separate from `notifier`, to keep one-way delivery and two-way
+interaction decoupled. It:
 
 1. Long-polls Telegram's `getUpdates` for messages and callback queries from
    the configured `TELEGRAM_CHAT_ID`. Other senders are dropped.
@@ -25,21 +26,32 @@ service (or a sibling `bot` service if isolation is preferred later) and:
    (`✅ Applied`, `❌ Rejected`, `💤 Snooze 1d`). A button press fires a
    `job.status.changed` event (or, for snooze, a new reminder row) without
    the user typing anything.
-4. Supports a small command grammar:
-   - `/add <url>` — fetches the page, extracts title/company from OG tags,
-     publishes `job.submitted` with `status=saved`. Missing fields are
-     resolved with follow-up prompts in the same chat.
-   - `/list` / `/list saved` — reads jobs from Postgres (or asks Store via
-     a read API) and replies with a numbered list.
-   - `/applied <n>`, `/rejected <n>`, `/offer <n>`, etc. — operate on the
-     last `/list` result.
+4. Supports a small command grammar, layered by frequency of use:
+   - **Frequent actions → inline buttons.** Reminder acks (`Applied`,
+     `Rejected`, `Snooze 1d`) are buttons; no typing.
+   - **Common-but-long actions → numeric shortcuts on the last `/list`.**
+     `/applied <n>`, `/rejected <n>`, `/offer <n>` — exact set TBD,
+     curated to the frequently used status subset (see Assumptions).
+   - **Rare actions → full commands.**
+     - `/add <url>` — fetches the page, extracts title/company from OG
+       tags, publishes `job.submitted` with `status=saved`. Missing
+       fields are resolved with follow-up prompts in the same chat.
+     - `/list` / `/list saved` — reads jobs from Postgres and replies
+       with a numbered list. Numbering is in-memory per chat and is
+       replaced on the next `/list`; not durable across bot restarts.
+
+   The split is intentionally tentative for v1 — promote/demote commands
+   between tiers as usage patterns reveal themselves.
 
 Dedup uses Telegram's monotonically increasing `update_id` plus the existing
 `processed_events` ledger (`bot` consumer namespace).
 
 ## Status
 
-Proposed.
+Accepted — implemented. The `bot` service lives at `cmd/bot` and
+`internal/bot`; the shared Telegram client is `internal/telegram`.
+The notifier was updated to attach the reminder inline keyboard.
+See `docs/runbook.md` §9 for the test walk-through.
 
 ## Group
 
@@ -60,6 +72,9 @@ integrates with the existing event bus; it adds no business logic.
   first component besides Store and Scheduler to read the DB; acceptable
   for v1 given a single deployment unit, revisitable if/when a read API
   is introduced.
+- Status vocabulary exposed by the bot is a curated subset of what the
+  CLI supports — only the frequently used statuses (e.g., `applied`,
+  `rejected`, `offer`). Rarely used transitions stay CLI-only for v1.
 
 ## Constraints
 
@@ -118,18 +133,19 @@ follow-up, not a prerequisite.
 
 ## Implications
 
-- New dependency on a Telegram bot library (`go-telegram/bot` or
-  `github.com/go-telegram-bot-api/telegram-bot-api`) or hand-rolled
-  `getUpdates` calls.
-- The notifier process gains a long-running poll loop alongside its Kafka
-  consumer. If this coupling becomes awkward, split into a `bot` service
-  later; the wire protocol (Kafka events) stays the same.
+- No new third-party Telegram dependency. The Telegram Bot API surface
+  the bot needs (`getUpdates`, `sendMessage`, `answerCallbackQuery`) is
+  small enough to wrap with `net/http` + `encoding/json`. Notifier's
+  existing outbound HTTP call to Telegram is precedent.
+- The bot is a new standalone service with its own `cmd/bot/main.go`,
+  its own compose entry, and its own Kafka producer + Postgres reader
+  wiring. Notifier remains a pure one-way sender.
 - The bot becomes a Kafka producer — needs producer client wiring like
   CLI has.
 - A new `bot` namespace enters `processed_events` (for `update_id`
   dedup).
-- Adds a Postgres read dependency to the bot (for `/list`). The bot must
-  receive `DATABASE_URL` in compose.
+- Adds a Postgres read dependency to the bot (for `/list`). The bot
+  service must receive `DATABASE_URL` in compose.
 - Reminder message format changes (now has buttons). Any external
   consumer of those messages — there is none today — would need to
   ignore the callback payload.
@@ -164,8 +180,8 @@ follow-up, not a prerequisite.
 
 ## Related artifacts
 
-- `cmd/notifier/main.go` — current Telegram sender; likely host of the
-  new bot loop.
+- `cmd/notifier/main.go` — current Telegram sender; reference for the
+  outbound HTTP pattern the new `cmd/bot/main.go` will reuse.
 - `cmd/cli/main.go` — reference for event production patterns.
 - `internal/events/` — event schemas the bot will produce.
 - `internal/db/schema.sql` — `processed_events`, `reminders`, `jobs`
@@ -191,8 +207,8 @@ follow-up, not a prerequisite.
 - `/add <url>` autofill: try OG tags (`og:title`, `og:site_name`),
   fall back to `<title>` minus boilerplate, fall back to asking the
   user.
-- Open question: should `/list` results expire (i.e., the numbering is
-  only valid until the next `/list`)? Recommend yes, stored in-memory
-  per chat — keeps state simple.
+- `/list` numbering is in-memory per chat and expires on the next
+  `/list`. Not durable across bot restarts; the user just re-issues
+  `/list`. Keeps state simple.
 - Snooze semantics: button = `due_at = now + 1d` for v1; no separate
   reminder kind.
