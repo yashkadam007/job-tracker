@@ -81,6 +81,8 @@ podman-compose run --rm cli ensure-topics
 Expected output:
 
 ```
+created: job.interview.recorded
+created: job.note.added
 created: job.reminder
 created: job.status.changed
 created: job.submitted
@@ -88,7 +90,7 @@ created: job.submitted
 
 Re-running prints `exists: …` for each — the command is idempotent.
 
-In Kafka UI → Topics, you should now see all three.
+In Kafka UI → Topics, you should now see all five.
 
 ---
 
@@ -113,7 +115,7 @@ podman-compose logs -f store scheduler notifier
 
 Expected startup lines:
 
-- **store:** `store: consuming job.submitted, job.status.changed (group=store)`
+- **store:** `store: consuming job.submitted, job.status.changed, job.note.added, job.interview.recorded (group=store)`
 - **scheduler:** `scheduler: group=scheduler, saved=168h0m0s, applied=336h0m0s, poll=30s`
 - **notifier:** `notifier: consuming job.reminder (group=notifier)`
 
@@ -156,6 +158,27 @@ Expected reactions (watch with `podman-compose logs -f …`):
 - **notifier:** (~10s later, with smoke-test env)
   `REMINDER followup_saved — Senior Backend Engineer @ Acme (saved, due ...) :: Still interested? ...`
 
+The bare three-flag form above still works. To exercise the richer
+metadata path, pass any of the optional flags:
+
+```bash
+podman-compose run --rm cli add \
+  --url https://example.com/job/2 \
+  --title "Staff Engineer" --company "Globex" \
+  --work-mode remote --seniority staff --source linkedin \
+  --tech-tag go --tech-tag postgres --custom-tag dream_company \
+  --comp-min 180000 --comp-max 230000 --comp-currency USD \
+  --priority 5
+```
+
+Inspect the row to confirm the typed columns + arrays landed:
+
+```sql
+SELECT url, work_mode, seniority, tech_tags, custom_tags, priority,
+       comp_min, comp_max, comp_currency
+  FROM jobs WHERE url = 'https://example.com/job/2';
+```
+
 ### 5b. Status change
 
 ```bash
@@ -181,7 +204,58 @@ Expected:
 - scheduler cancels pending reminders, schedules nothing new.
 - notifier stays quiet.
 
-### 5d. Idempotency check
+### 5d. Note + interview pipeline
+
+```bash
+podman-compose run --rm cli note add \
+  --url https://example.com/job/1 \
+  --body "Recruiter said they'll decide by Friday."
+```
+
+Expected store log: `note: added for https://example.com/job/1`.
+Verify the row:
+
+```sql
+SELECT url, body, created_at FROM job_notes
+ ORDER BY created_at DESC LIMIT 5;
+```
+
+Then schedule and update an interview. **Save the printed `interview_id`** —
+`interview update` needs it (the CLI doesn't persist any local state).
+
+```bash
+podman-compose run --rm cli interview schedule \
+  --url https://example.com/job/1 \
+  --round phone_screen \
+  --scheduled-at 2026-06-01T15:00:00Z \
+  --interviewer "Alex" --interviewer "Sam" \
+  --notes "30 min screening"
+
+# copy interview_id from the output, then:
+podman-compose run --rm cli interview update \
+  --interview-id <id-from-above> \
+  --url https://example.com/job/1 \
+  --completed-at 2026-06-01T15:35:00Z \
+  --outcome passed
+```
+
+Verify the upsert merged the two events (round + interviewers from
+schedule, completed_at + outcome from update — neither got wiped):
+
+```sql
+SELECT interview_id, round, scheduled_at, completed_at, outcome, interviewers
+  FROM job_interviews ORDER BY updated_at DESC LIMIT 5;
+```
+
+Status transitions also leave a trail now — every `cli status …` writes
+to `job_status_history`:
+
+```sql
+SELECT url, status, changed_at FROM job_status_history
+ ORDER BY changed_at;
+```
+
+### 5e. Idempotency check
 
 Restart the store container:
 
@@ -225,6 +299,19 @@ SELECT consumer, count(*) FROM processed_events GROUP BY consumer;
 SELECT id, url, kind, due_at FROM reminders
  WHERE fired_at IS NULL AND NOT cancelled
  ORDER BY due_at;
+
+-- transitions over time (source of truth for time-based analytics)
+SELECT url, status, changed_at FROM job_status_history
+ ORDER BY changed_at DESC LIMIT 20;
+
+-- pipeline state per job
+SELECT url, round, scheduled_at, completed_at, outcome
+  FROM job_interviews ORDER BY scheduled_at DESC NULLS LAST LIMIT 20;
+
+-- notes timeline for one job
+SELECT created_at, body FROM job_notes
+ WHERE url = 'https://example.com/job/1'
+ ORDER BY created_at;
 ```
 
 ### Kafka UI (http://localhost:8088)
@@ -302,6 +389,14 @@ Three things to check, in order:
 ### "topic already exists" error on `ensure-topics`
 
 That's expected behaviour, printed as `exists: <topic>`. Not an error.
+
+### `reminders` won't create on an old DB volume
+
+The schema now declares `reminders.url REFERENCES jobs(url)`. `CREATE
+TABLE IF NOT EXISTS` is a no-op against a pre-existing `reminders`
+table that lacks the FK, so the new constraint silently doesn't land.
+This is greenfield (per ADR 0001) — wipe and recreate:
+`podman-compose down -v && podman-compose up -d`.
 
 ### Want to clear a single consumer group's offset?
 

@@ -41,7 +41,12 @@ func main() {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers()...),
 		kgo.ConsumerGroup(store.Consumer),
-		kgo.ConsumeTopics(events.TopicJobSubmitted, events.TopicJobStatusChanged),
+		kgo.ConsumeTopics(
+			events.TopicJobSubmitted,
+			events.TopicJobStatusChanged,
+			events.TopicJobNoteAdded,
+			events.TopicJobInterviewRecorded,
+		),
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	)
@@ -50,8 +55,9 @@ func main() {
 	}
 	defer cl.Close()
 
-	log.Printf("store: consuming %s, %s (group=%s)",
-		events.TopicJobSubmitted, events.TopicJobStatusChanged, store.Consumer)
+	log.Printf("store: consuming %s, %s, %s, %s (group=%s)",
+		events.TopicJobSubmitted, events.TopicJobStatusChanged,
+		events.TopicJobNoteAdded, events.TopicJobInterviewRecorded, store.Consumer)
 
 	for {
 		fetches := cl.PollFetches(ctx)
@@ -113,6 +119,40 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 			log.Printf("status: no job for url=%s (status event before submit?)", ev.URL)
 		default:
 			log.Printf("status: %s → %s", ev.URL, ev.Status)
+		}
+	case events.TopicJobNoteAdded:
+		var ev events.JobNoteAdded
+		if err := json.Unmarshal(r.Value, &ev); err != nil {
+			return err
+		}
+		applied, missing, err := st.ApplyNoteAdded(ctx, ev)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !applied:
+			log.Printf("note: dup event_id=%s skipped", ev.EventID)
+		case missing:
+			log.Printf("note: no job for url=%s (note before submit?)", ev.URL)
+		default:
+			log.Printf("note: added for %s", ev.URL)
+		}
+	case events.TopicJobInterviewRecorded:
+		var ev events.JobInterviewRecorded
+		if err := json.Unmarshal(r.Value, &ev); err != nil {
+			return err
+		}
+		applied, missing, err := st.ApplyInterviewRecorded(ctx, ev)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !applied:
+			log.Printf("interview: dup event_id=%s skipped", ev.EventID)
+		case missing:
+			log.Printf("interview: no job for url=%s (interview before submit?)", ev.URL)
+		default:
+			log.Printf("interview: %s url=%s", ev.InterviewID, ev.URL)
 		}
 	default:
 		return errors.New("unknown topic: " + r.Topic)

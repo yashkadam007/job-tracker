@@ -1,6 +1,20 @@
 // jobs — small CLI that publishes events to Kafka. This is the first
 // "producer" in the system. It does no DB work; the Store consumer
 // listens on the same topics and is responsible for persistence.
+//
+// Subcommands map 1:1 to event topics:
+//
+//   add               → job.submitted
+//   status            → job.status.changed
+//   note add          → job.note.added
+//   interview schedule → job.interview.recorded (schedule shape)
+//   interview update   → job.interview.recorded (partial update; same topic)
+//
+// `interview update` requires --interview-id explicitly; the CLI doesn't
+// keep state and doesn't talk to Postgres. The id is printed on
+// `interview schedule` and is the user's responsibility to track.
+// (ADR 0001 open question, resolved by deferral: revisit once ADR 0003
+// adds a Postgres-reading `/list` precedent the CLI could mirror.)
 package main
 
 import (
@@ -32,6 +46,10 @@ func main() {
 		cmdAdd(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
+	case "note":
+		cmdNote(os.Args[2:])
+	case "interview":
+		cmdInterview(os.Args[2:])
 	case "ensure-topics":
 		cmdEnsureTopics()
 	case "-h", "--help", "help":
@@ -46,8 +64,11 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  jobs ensure-topics")
-	fmt.Fprintln(os.Stderr, "  jobs add --url <u> --title <t> --company <c> [--status saved]")
+	fmt.Fprintln(os.Stderr, "  jobs add --url <u> --title <t> --company <c> [metadata flags…]")
 	fmt.Fprintln(os.Stderr, "  jobs status <url> <new-status>")
+	fmt.Fprintln(os.Stderr, "  jobs note add --url <u> --body <text>")
+	fmt.Fprintln(os.Stderr, "  jobs interview schedule --url <u> --round <r> --scheduled-at <ts> [--interviewer <n> …] [--notes <text>]")
+	fmt.Fprintln(os.Stderr, "  jobs interview update --interview-id <id> --url <u> [--completed-at <ts>] [--outcome <o>] [--interviewer <n> …] [--notes <text>]")
 }
 
 // brokers reads KAFKA_BOOTSTRAP (comma-separated) or defaults to the
@@ -76,6 +97,8 @@ func cmdEnsureTopics() {
 		events.TopicJobSubmitted,
 		events.TopicJobStatusChanged,
 		events.TopicJobReminder,
+		events.TopicJobNoteAdded,
+		events.TopicJobInterviewRecorded,
 	}
 
 	// 1 partition, 1 replica — fine for a single-broker dev cluster.
@@ -101,15 +124,60 @@ func cmdEnsureTopics() {
 
 func cmdAdd(args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
+
 	url := fs.String("url", "", "job posting URL (required)")
 	title := fs.String("title", "", "job title (required)")
 	company := fs.String("company", "", "company name (required)")
 	status := fs.String("status", string(events.StatusSaved), "initial status")
+
+	workMode := fs.String("work-mode", "", "onsite|hybrid|remote")
+	location := fs.String("location", "", "city/region")
+	seniority := fs.String("seniority", "", "intern|junior|mid|senior|staff|principal")
+	source := fs.String("source", "", "linkedin|indeed|referral|company_site|recruiter|other")
+	var techTags, customTags stringSlice
+	fs.Var(&techTags, "tech-tag", "tech tag (repeatable)")
+	fs.Var(&customTags, "custom-tag", "custom tag (repeatable)")
+	descFile := fs.String("description-file", "", "path to file containing job description")
+	deadline := fs.String("deadline", "", "application deadline (RFC3339 or YYYY-MM-DD)")
+
+	compMin := fs.Float64("comp-min", 0, "minimum compensation (numeric)")
+	compMax := fs.Float64("comp-max", 0, "maximum compensation (numeric)")
+	compCurrency := fs.String("comp-currency", "", "compensation currency (e.g. USD)")
+	compEquity := fs.String("comp-equity", "", "equity description, free-form")
+	compBonus := fs.String("comp-bonus", "", "bonus description, free-form")
+
+	resume := fs.String("resume", "", "resume version label")
+	coverLetter := fs.String("cover-letter", "", "cover letter version label")
+	referral := fs.String("referral", "", "referral name")
+	recruiterName := fs.String("recruiter-name", "", "recruiter name")
+	recruiterEmail := fs.String("recruiter-email", "", "recruiter email")
+	recruiterPhone := fs.String("recruiter-phone", "", "recruiter phone")
+
+	priority := fs.Int("priority", 0, "1 (low) to 5 (high); 0 = unset")
+
 	_ = fs.Parse(args)
 
 	if *url == "" || *title == "" || *company == "" {
 		fs.Usage()
 		os.Exit(2)
+	}
+
+	description := ""
+	if *descFile != "" {
+		b, err := os.ReadFile(*descFile)
+		if err != nil {
+			log.Fatalf("read description file: %v", err)
+		}
+		description = string(b)
+	}
+
+	var deadlinePtr *time.Time
+	if *deadline != "" {
+		t, err := parseTime(*deadline)
+		if err != nil {
+			log.Fatalf("--deadline: %v", err)
+		}
+		deadlinePtr = &t
 	}
 
 	ev := events.JobSubmitted{
@@ -119,6 +187,30 @@ func cmdAdd(args []string) {
 		Company:     *company,
 		Status:      events.JobStatus(*status),
 		SubmittedAt: time.Now().UTC(),
+
+		WorkMode:    events.WorkMode(*workMode),
+		Location:    *location,
+		Seniority:   events.Seniority(*seniority),
+		Source:      events.Source(*source),
+		TechTags:    []string(techTags),
+		Description: description,
+		Deadline:    deadlinePtr,
+
+		CompMin:      floatPtrIfSet(fs, "comp-min", *compMin),
+		CompMax:      floatPtrIfSet(fs, "comp-max", *compMax),
+		CompCurrency: *compCurrency,
+		CompEquity:   *compEquity,
+		CompBonus:    *compBonus,
+
+		ResumeVersion:      *resume,
+		CoverLetterVersion: *coverLetter,
+		Referral:           *referral,
+		RecruiterName:      *recruiterName,
+		RecruiterEmail:     *recruiterEmail,
+		RecruiterPhone:     *recruiterPhone,
+
+		Priority:   intPtrIfSet(fs, "priority", *priority),
+		CustomTags: []string(customTags),
 	}
 	// Partition key = URL. Two events for the same URL land on the same
 	// partition, so Kafka preserves their order — Store will see
@@ -140,6 +232,143 @@ func cmdStatus(args []string) {
 	}
 	publish(events.TopicJobStatusChanged, ev.URL, ev)
 	fmt.Printf("status changed: %s → %s\n", ev.URL, ev.Status)
+}
+
+func cmdNote(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: jobs note add --url <u> --body <text>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "add":
+		cmdNoteAdd(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown note subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func cmdNoteAdd(args []string) {
+	fs := flag.NewFlagSet("note add", flag.ExitOnError)
+	url := fs.String("url", "", "job posting URL (required)")
+	body := fs.String("body", "", "note body (required)")
+	_ = fs.Parse(args)
+
+	if *url == "" || *body == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	ev := events.JobNoteAdded{
+		EventID:   uuid.NewString(),
+		URL:       *url,
+		Body:      *body,
+		CreatedAt: time.Now().UTC(),
+	}
+	publish(events.TopicJobNoteAdded, ev.URL, ev)
+	fmt.Printf("note added: %s\n", ev.URL)
+}
+
+func cmdInterview(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: jobs interview schedule|update …")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "schedule":
+		cmdInterviewSchedule(args[1:])
+	case "update":
+		cmdInterviewUpdate(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown interview subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func cmdInterviewSchedule(args []string) {
+	fs := flag.NewFlagSet("interview schedule", flag.ExitOnError)
+	url := fs.String("url", "", "job posting URL (required)")
+	round := fs.String("round", "", "phone_screen|technical|behavioral|system_design|onsite|final|other (required)")
+	scheduledAt := fs.String("scheduled-at", "", "RFC3339 timestamp or YYYY-MM-DD (required)")
+	var interviewers stringSlice
+	fs.Var(&interviewers, "interviewer", "interviewer name (repeatable)")
+	notes := fs.String("notes", "", "free-text notes")
+	_ = fs.Parse(args)
+
+	if *url == "" || *round == "" || *scheduledAt == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	ts, err := parseTime(*scheduledAt)
+	if err != nil {
+		log.Fatalf("--scheduled-at: %v", err)
+	}
+
+	ev := events.JobInterviewRecorded{
+		EventID:      uuid.NewString(),
+		InterviewID:  uuid.NewString(),
+		URL:          *url,
+		Round:        events.InterviewRound(*round),
+		ScheduledAt:  &ts,
+		Interviewers: []string(interviewers),
+		Notes:        *notes,
+		RecordedAt:   time.Now().UTC(),
+	}
+	publish(events.TopicJobInterviewRecorded, ev.URL, ev)
+	fmt.Printf("interview scheduled: %s (round=%s)\n", ev.URL, ev.Round)
+	fmt.Printf("interview_id: %s\n", ev.InterviewID)
+	fmt.Println("(save this id — `interview update` needs it.)")
+}
+
+func cmdInterviewUpdate(args []string) {
+	fs := flag.NewFlagSet("interview update", flag.ExitOnError)
+	interviewID := fs.String("interview-id", "", "interview id from `interview schedule` (required)")
+	url := fs.String("url", "", "job posting URL (required; partition key)")
+	completedAt := fs.String("completed-at", "", "RFC3339 timestamp or YYYY-MM-DD")
+	outcome := fs.String("outcome", "", "passed|failed|no_show|pending|withdrawn")
+	var interviewers stringSlice
+	fs.Var(&interviewers, "interviewer", "interviewer name (repeatable; replaces list when provided)")
+	notes := fs.String("notes", "", "free-text notes")
+	round := fs.String("round", "", "override round (rarely needed)")
+	scheduledAt := fs.String("scheduled-at", "", "override scheduled timestamp (rarely needed)")
+	_ = fs.Parse(args)
+
+	if *interviewID == "" || *url == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	ev := events.JobInterviewRecorded{
+		EventID:     uuid.NewString(),
+		InterviewID: *interviewID,
+		URL:         *url,
+		Round:       events.InterviewRound(*round),
+		Outcome:     events.InterviewOutcome(*outcome),
+		Notes:       *notes,
+		RecordedAt:  time.Now().UTC(),
+	}
+	if *scheduledAt != "" {
+		ts, err := parseTime(*scheduledAt)
+		if err != nil {
+			log.Fatalf("--scheduled-at: %v", err)
+		}
+		ev.ScheduledAt = &ts
+	}
+	if *completedAt != "" {
+		ts, err := parseTime(*completedAt)
+		if err != nil {
+			log.Fatalf("--completed-at: %v", err)
+		}
+		ev.CompletedAt = &ts
+	}
+	// nil slice → leave existing list alone (store COALESCEs on the raw
+	// parameter). Non-nil (even empty) → replace.
+	if len(interviewers) > 0 {
+		ev.Interviewers = []string(interviewers)
+	}
+	publish(events.TopicJobInterviewRecorded, ev.URL, ev)
+	fmt.Printf("interview updated: %s\n", ev.InterviewID)
 }
 
 // publish serializes v to JSON and sends a single record synchronously.
@@ -173,4 +402,50 @@ func publish(topic, key string, v any) {
 	if err := cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
 		log.Fatalf("publish: %v", err)
 	}
+}
+
+// stringSlice collects repeated --flag values into a slice.
+type stringSlice []string
+
+func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
+
+// parseTime accepts RFC3339 first, then YYYY-MM-DD (treated as UTC
+// midnight). Keeps the CLI ergonomic for both deadlines (date) and
+// interview slots (full timestamp).
+func parseTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 or YYYY-MM-DD, got %q", s)
+}
+
+// floatPtrIfSet returns &v if the flag was explicitly passed (even with
+// value 0), nil otherwise. Lets the user submit comp-min=0 distinctly
+// from "not specified".
+func floatPtrIfSet(fs *flag.FlagSet, name string, v float64) *float64 {
+	if !flagWasSet(fs, name) {
+		return nil
+	}
+	return &v
+}
+
+func intPtrIfSet(fs *flag.FlagSet, name string, v int) *int {
+	if !flagWasSet(fs, name) {
+		return nil
+	}
+	return &v
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
