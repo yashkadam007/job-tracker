@@ -18,14 +18,15 @@ duplicating frontend logic.
 
 ## Decision
 
-Build `cmd/tui` using
+Build `cmd/jobtracker` using
 [Bubble Tea](https://github.com/charmbracelet/bubbletea) with the
 `bubbles` (widgets) and `lipgloss` (styling) companion libraries.
+The installed binary is named `jobtracker`.
 
 Architecture:
 
-- Single Go binary, installed locally on macOS (`go install ./cmd/tui`).
-  No daemon, no service to run.
+- Single Go binary, installed locally on macOS
+  (`go install ./cmd/jobtracker`). No daemon, no service to run.
 - Talks directly to the home-server's Postgres and Kafka **over
   Tailscale** (or LAN if the laptop is at home). No API tier.
 - Uses `internal/jobclient.Publisher` and `internal/jobclient.Reader`
@@ -40,13 +41,21 @@ UX shape (v1):
   pill at the top.
 - A detail view: selected job's full info plus its pending reminder
   (if any).
-- Keyboard hotkeys for status transitions on the highlighted row:
-  `a`=applied, `r`=rejected, `o`=offer, `w`=withdrawn, `s`=snooze 1d,
-  `n`=new (modal: prompts for URL/title/company), `/`=search, `q`=quit.
+- Keyboard hotkeys for status transitions on the highlighted row, one
+  per status from `schema.sql` (`saved, applied, interview, rejected,
+  offer, withdrawn`):
+  `a`=applied, `i`=interview, `o`=offer, `r`=rejected, `w`=withdrawn,
+  `S`=set back to saved (shift-s, to avoid clobbering snooze).
+  Other keys: `s`=snooze 1d, `n`=new (modal: prompts for URL/title/
+  company), `/`=search, `q`=quit.
 - Each transition publishes a `job.status.changed` event via
-  `jobclient.Publisher`. The UI then re-queries
-  `jobclient.Reader.List` to reflect the new state — no optimistic
-  UI for v1.
+  `jobclient.Publisher`. The UI **renders the new status optimistically
+  on keypress** and re-queries `jobclient.Reader.List` immediately
+  afterward to reconcile. If the reconcile shows a different status
+  (e.g., the consumer rejected the event as an invalid transition),
+  the row reverts and a transient error line surfaces at the bottom of
+  the view. Rationale: the store consumer is async, so a naive
+  publish-then-read sees stale data and the UI appears unresponsive.
 
 Out of scope for v1:
 
@@ -59,7 +68,7 @@ Out of scope for v1:
 
 ## Status
 
-Proposed.
+Approved.
 
 ## Group
 
@@ -135,32 +144,42 @@ this is acceptable.
 ## Implications
 
 - **`KAFKA_ADVERTISED_LISTENERS` must include a non-`localhost`
-  external hostname.** Today `compose.yml:23` advertises
-  `EXTERNAL://localhost:9092`. A client on the Mac connecting to
-  `homeserver:9092` will be redirected by Kafka to "localhost:9092"
-  and try to connect to its own loopback — and fail. Either:
-  - Change the EXTERNAL advertised listener to the home server's
-    tailnet hostname (e.g.,
-    `EXTERNAL://homeserver.tailnet.ts.net:9092`), or
-  - Add a third listener (e.g., `TAILNET://0.0.0.0:9094`) advertised
-    as the tailnet hostname, leaving local-host clients undisturbed.
+  external hostname** — in scope for this ADR, not a follow-up.
+  Today `compose.yml:23` advertises `EXTERNAL://localhost:9092`. A
+  client on the Mac connecting to `homeserver:9092` will be redirected
+  by Kafka to "localhost:9092" and try to connect to its own loopback
+  — and fail. The fix: add a third listener `TAILNET://0.0.0.0:9094`
+  advertised as the tailnet hostname, leaving the existing `EXTERNAL`
+  listener (and host-side dev workflows that hit `localhost:9092`)
+  undisturbed. Concretely:
+  - `KAFKA_LISTENERS`: append `,TAILNET://0.0.0.0:9094`
+  - `KAFKA_ADVERTISED_LISTENERS`: append
+    `,TAILNET://homeserver.tailnet.ts.net:9094`
+  - `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP`: append `,TAILNET:PLAINTEXT`
+  - `ports`: expose `9094:9094`
 
-  Recommend the second option to avoid breaking host-side dev
-  workflows that connect via `localhost:9092`. This is the single
-  most important compose change implied by this ADR and worth
-  capturing as a sub-task.
+  The TUI's `JOB_TRACKER_KAFKA_BOOTSTRAP` then points at
+  `homeserver.tailnet.ts.net:9094`. Validate end-to-end with a
+  host-side `kafka-console-producer` against the new listener before
+  wiring the TUI itself.
 - Postgres on Tailscale needs `listen_addresses = '*'` (default
   in the official image is `*`) and a `pg_hba.conf` rule that allows
   the tailnet CIDR. The current compose just exposes `5432:5432` on
   the host — Tailscale traffic will arrive on that interface, so as
   long as the host is on tailnet, no further DB-side changes are
   needed.
-- New cmd directory `cmd/tui/`. Build via existing `go build ./...`.
-  Distribution is `go install ./cmd/tui` to `~/go/bin/jt` on the
-  Mac.
-- TUI config: env vars `KAFKA_BOOTSTRAP`, `DATABASE_URL` (same names
-  as services). A small `~/.config/job-tracker/tui.toml` is overkill
-  for v1; defer.
+- New cmd directory `cmd/jobtracker/`. Build via existing
+  `go build ./...`. Distribution is `go install ./cmd/jobtracker` to
+  `~/go/bin/jobtracker` on the Mac.
+- TUI config: env vars `JOB_TRACKER_KAFKA_BOOTSTRAP` and
+  `JOB_TRACKER_DATABASE_URL`. Both are namespaced (rather than
+  reusing the services' generic `KAFKA_BOOTSTRAP` / `DATABASE_URL`)
+  because the TUI reads its config from the user's `~/.zshrc`, a
+  global namespace shared with everything else on the machine. The
+  plaintext password lives in the shell rc; trust boundary is
+  "anyone with my login is
+  me," same as `gh` tokens and SSH keys. A small
+  `~/.config/job-tracker/tui.toml` is overkill for v1; defer.
 - Bubble Tea pulls in `github.com/charmbracelet/bubbletea`,
   `bubbles`, `lipgloss`. All MIT, all stable.
 - Operational: the TUI is a long-lived Kafka producer per session.
@@ -177,8 +196,6 @@ this is acceptable.
   is its desktop/proactive complement; both publish the same events.
 - **Future** — Live updates from Kafka in the TUI (consumer-side).
   Deferred to v2.
-- **Future** — Compose change to advertise an off-box Kafka listener.
-  Worth its own small ADR or a runbook entry; capturing here for now.
 
 ## Related requirements
 
@@ -189,10 +206,11 @@ this is acceptable.
 
 ## Related artifacts
 
-- `cmd/tui/` (new)
+- `cmd/jobtracker/` (new)
 - `internal/jobclient/` (from ADR 0002; the TUI is a primary consumer)
-- `compose.yml` — `KAFKA_ADVERTISED_LISTENERS` likely needs an
-  additional entry (see Implications).
+- `compose.yml` — add a `TAILNET` listener on `:9094` advertised as
+  the home server's tailnet hostname (see Implications for the exact
+  diff). In scope for this ADR.
 - `docs/runbook.md` — should grow a "Install the TUI on your Mac"
   section once shipped.
 

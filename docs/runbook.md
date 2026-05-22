@@ -602,7 +602,186 @@ SELECT consumer, count(*) FROM processed_events GROUP BY consumer;
 
 ---
 
-## 10. Day-to-day
+## 10. Desktop TUI on the Mac
+
+The `jobtracker` binary (ADR 0004) is the keyboard-driven triage tool
+for weekly review sessions — runs locally on macOS, talks to the home
+server's Postgres + Kafka over Tailscale. Single Go binary, no daemon,
+stateless on launch.
+
+### 10a. One-time: expose Kafka on the tailnet
+
+The home server's compose already declares a third Kafka listener
+(`TAILNET://0.0.0.0:9094`) advertised under
+`${KAFKA_TAILNET_HOSTNAME:-homeserver.tailnet.ts.net}:9094`. The
+default placeholder hostname will not resolve from the Mac — set
+your actual MagicDNS name (Tailscale Admin → Machines → the home
+server) and recreate Kafka:
+
+```bash
+# On the Ubuntu host:
+cat >> .env <<'EOF'
+KAFKA_TAILNET_HOSTNAME=ubuntu-home.tailXXXX.ts.net
+EOF
+
+podman-compose up -d --force-recreate kafka
+```
+
+Postgres needs nothing extra — `5432:5432` already binds to all
+host interfaces, and Tailscale traffic arrives on the same socket.
+
+### 10b. Verify the TAILNET listener from the Mac
+
+From your Mac, before wiring the TUI itself (per ADR Implications):
+
+```bash
+brew install kcat                                  # one-time
+kcat -b ubuntu-home.tailXXXX.ts.net:9094 -L         # list metadata
+```
+
+Expected: a `Metadata for all topics` block listing the five job
+topics with brokers advertised as
+`ubuntu-home.tailXXXX.ts.net:9094`. If kcat prints
+`Connection refused` or `Name or service not known`, the listener
+or your tailnet hostname is misconfigured — fix this *before* the
+TUI, since its failure mode is much less informative.
+
+Also confirm Postgres is reachable:
+
+```bash
+psql "postgres://jobtracker:jobtracker@ubuntu-home.tailXXXX.ts.net:5432/jobtracker?sslmode=disable" \
+  -c 'SELECT count(*) FROM jobs;'
+```
+
+### 10c. Install the TUI
+
+You need Go ≥ 1.25 on the Mac:
+
+```bash
+brew install go
+```
+
+From a fresh clone of the repo on your Mac (the TUI does not run in
+a container — it's a local binary):
+
+```bash
+cd ~/job-tracker
+go install ./cmd/jobtracker
+# the binary lands at ~/go/bin/jobtracker; make sure that's on $PATH
+```
+
+Add the two namespaced env vars to your shell rc — the TUI reads
+its config from there because the rc is the only "global namespace"
+shared with other tools on the machine (per ADR 0004):
+
+```bash
+cat >> ~/.zshrc <<'EOF'
+export JOB_TRACKER_KAFKA_BOOTSTRAP=ubuntu-home.tailXXXX.ts.net:9094
+export JOB_TRACKER_DATABASE_URL="postgres://jobtracker:jobtracker@ubuntu-home.tailXXXX.ts.net:5432/jobtracker?sslmode=disable"
+EOF
+
+source ~/.zshrc
+```
+
+Then launch:
+
+```bash
+jobtracker
+```
+
+Expected: the alt-screen view with the title bar, a `filter: any`
+pill, the table of jobs ordered by `last_event_at DESC`, a detail
+panel under it, and a help line of hotkeys. If the table is empty,
+add a row through the CLI / bot first (§5 or §9).
+
+### 10d. Smoke tests
+
+**Status hotkey + reconcile.** Highlight a row with `↑/↓` and press
+`a`. The status pill on that row flips to `applied` immediately
+(optimistic), then re-queries Postgres. Confirm the row actually
+moved in the canonical store:
+
+```bash
+# on the Ubuntu host
+podman-compose logs --tail=10 store      # status: <job-id> → applied
+```
+
+```sql
+SELECT job_id, status FROM jobs WHERE job_id = '<job-id>';
+```
+
+Same shape for `i` (interview), `o` (offer), `r` (rejected),
+`w` (withdrawn), and shift-`S` (back to saved).
+
+**Snooze.** Press `s` on the highlighted row. No status change;
+a fresh `followup_saved` reminder lands 24h out. Verify:
+
+```sql
+SELECT id, job_id, kind, due_at FROM reminders
+ ORDER BY id DESC LIMIT 3;
+```
+
+**New job (`n`).** A modal prompts for URL, then title, then
+company. On enter at the company step, the TUI publishes
+`job.submitted` and reloads. Verify the same way as a CLI `add`:
+
+```bash
+podman-compose logs --tail=10 store      # submitted: <title> @ <company> (saved)
+```
+
+**Search (`/`).** Type a substring and hit enter — the list
+filters client-side over the current snapshot. `esc` (or `/`
+followed by an empty enter) clears it.
+
+**Status filter (`f`).** Cycles the pill through `any → saved →
+applied → interview → offer → rejected → withdrawn → any`. Each
+step re-queries with the server-side filter on.
+
+**Reload (`shift-R`)** forces a fresh List in case something
+changed via the bot or CLI mid-session.
+
+**Quit (`q` / `ctrl+c`).** The Bubble Tea program exits, defers
+run, and the Publisher flushes its in-flight produces. Confirm
+no `producer close:` errors on stderr.
+
+### 10e. Cross-frontend coherence
+
+While the TUI is open, add a job from the Telegram bot:
+
+```
+/add https://example.com/job/tui-cross
+```
+
+The TUI won't update automatically (live Kafka updates are v2 —
+ADR 0004 Out of scope). Press `shift-R` to reload — the row
+appears. Same the other way: mark a job applied in the TUI, then
+`/list` in the bot — the new status is there.
+
+### 10f. Troubleshooting
+
+**Connection timed out on launch.** Hostname or listener is wrong.
+Re-run the `kcat -L` check in §10b. If `kcat` works but the TUI
+doesn't, double-check `JOB_TRACKER_KAFKA_BOOTSTRAP` actually exported
+into the shell where you launched (`echo $JOB_TRACKER_KAFKA_BOOTSTRAP`).
+
+**`postgres: dial tcp …: connect: operation timed out`.** Either
+Tailscale is down on the Mac, or the home server is. `tailscale
+status` should show the home server as `active; direct`.
+
+**Status flip on keypress reverts a moment later.** The Store
+consumer rejected the transition (e.g. `offer → saved` isn't a
+sensible move, or the consumer logged a constraint failure). Watch
+`podman-compose logs store` while pressing the key; the rejected
+event will be in the log. The TUI's "reconcile after publish" is
+exactly the mechanism that surfaces this.
+
+**Terminal layout looks cramped.** Resize the window — the table
+columns rebalance on `WindowSizeMsg`. The TUI is designed for
+≥ 100 columns; below that, truncation gets aggressive.
+
+---
+
+## 11. Day-to-day
 
 After the first-time setup above:
 

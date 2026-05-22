@@ -6,6 +6,7 @@ services:
     container_name: job-tracker-kafka
     ports:
       - "9092:9092"
+      - "9094:9094"
     environment:
       # KRaft mode: Kafka runs without ZooKeeper. This single node plays
       # both the "broker" role (stores messages) and the "controller"
@@ -18,10 +19,14 @@ services:
       # Listeners — where Kafka accepts connections.
       #   INTERNAL  (kafka:29092)   used by other containers on this network
       #   EXTERNAL  (localhost:9092) used by anything on the host
+      #   TAILNET   (0.0.0.0:9094)  reachable from the tailnet; advertised
+      #                             as the home-server's tailnet hostname
+      #                             so the desktop TUI on the Mac can
+      #                             produce/consume over Tailscale (ADR 0004)
       #   CONTROLLER (kafka:9093)   internal KRaft chatter
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,TAILNET://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092,TAILNET://${KAFKA_TAILNET_HOSTNAME:-homeserver.tailnet.ts.net}:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,TAILNET:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
 
       # Single-node cluster tuning. Defaults assume 3 brokers.
