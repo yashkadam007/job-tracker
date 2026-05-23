@@ -29,3 +29,22 @@ single-operator case, but it leaves two gaps worth addressing later:
 Neither is urgent given single-operator usage and outbound-only network
 posture, but both should land before the bot is ever exposed to a second
 user or a less trusted environment.
+
+## Unified `/health` endpoint across services
+
+Source: ADR 0006.
+
+ADR 0006 introduces a per-consumer admin HTTP server (`:9090` for store,
+`:9091` for scheduler) exposing `/skip-count` and `/healthz`. Other
+services (`bot`, `notifier`) have no health surface at all.
+
+For v2: consolidate into a single `/health` endpoint per service that
+returns detailed status — uptime, last-processed offset (where
+applicable), skip counts by class, downstream dependency reachability
+(Postgres, Kafka), and any service-specific liveness signals. The TUI's
+status panel would then read one endpoint per service instead of
+ad-hoc per-feature endpoints.
+
+Out of scope for ADR 0006's v1 because the minimum useful surface there
+is just the skip counter; the broader health view is a separate
+concern.

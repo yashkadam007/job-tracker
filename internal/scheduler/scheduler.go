@@ -54,7 +54,7 @@ type DueReminder struct {
 func (s *Scheduler) HandleSubmitted(ctx context.Context, ev events.JobSubmitted) (applied bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -62,16 +62,16 @@ func (s *Scheduler) HandleSubmitted(ctx context.Context, ev events.JobSubmitted)
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, nil
 		}
-		return false, err
+		return false, wrapDBError(err)
 	}
 	if kind, due, ok := s.dueForStatus(ev.Status, ev.SubmittedAt); ok {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO reminders (job_id, kind, due_at) VALUES ($1, $2, $3)`,
 			ev.JobID, string(kind), due); err != nil {
-			return false, err
+			return false, wrapDBError(err)
 		}
 	}
-	return true, tx.Commit(ctx)
+	return true, wrapDBError(tx.Commit(ctx))
 }
 
 // HandleStatusChanged reacts to a status change: cancel any pending
@@ -80,7 +80,7 @@ func (s *Scheduler) HandleSubmitted(ctx context.Context, ev events.JobSubmitted)
 func (s *Scheduler) HandleStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -88,22 +88,22 @@ func (s *Scheduler) HandleStatusChanged(ctx context.Context, ev events.JobStatus
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, nil
 		}
-		return false, err
+		return false, wrapDBError(err)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE reminders SET cancelled = true
            WHERE job_id = $1 AND fired_at IS NULL AND NOT cancelled`,
 		ev.JobID); err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 	if kind, due, ok := s.dueForStatus(ev.Status, ev.ChangedAt); ok {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO reminders (job_id, kind, due_at) VALUES ($1, $2, $3)`,
 			ev.JobID, string(kind), due); err != nil {
-			return false, err
+			return false, wrapDBError(err)
 		}
 	}
-	return true, tx.Commit(ctx)
+	return true, wrapDBError(tx.Commit(ctx))
 }
 
 // dueForStatus encodes the v1 policy. Only saved/applied get a

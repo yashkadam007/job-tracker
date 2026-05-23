@@ -95,7 +95,7 @@ consumers. `cmd/notifier` is unchanged.
 
 ## Status
 
-Proposed.
+Implemented.
 
 ## Group
 
@@ -302,15 +302,18 @@ Alternatives considered:
   re-validate via ADR 0005), then publish back to the original topic
   with `kcat`. Document in `docs/runbook.md` when the path first runs
   in anger.
-- **Open question:** the scheduler's failure mode is less severe
-  (missed reminder, not missed row). Should it skip the admin HTTP
-  server entirely and just log? Probably not — uniformity across
-  consumers is worth the few lines.
-- **Open question:** panic recovery in the consumer loop. A
-  `defer recover()` that converts panics into `default`-case
-  `log.Fatalf` would prevent goroutine-level panics from leaving the
-  process running with a dead consumer. Slightly defensive, probably
-  worth adding; defer to implementation taste.
+- **Scheduler admin HTTP server.** The scheduler's failure mode is less
+  severe (missed reminder, not missed row), but it still runs the same
+  admin HTTP server shape as `cmd/store`. Uniformity across consumers
+  is worth the few lines — the TUI status panel treats both endpoints
+  identically.
+- **Panic recovery in the consumer loop.** Each consumer wraps its
+  handler invocation with `defer recover()`. A recovered panic is
+  treated as the `default` case: structured log with
+  `topic/partition/offset/payload_b64` and a stack snippet, then
+  `log.Fatalf`. Same crash outcome as an unrecovered panic, but the
+  operator gets a structured line identifying the offending message
+  instead of a raw stack trace.
 - **Open question:** rate-limiting on the structured log path. If a
   burst of 1000 identical decode errors arrives, the log fills with
   noise. Worth a per-class log-coalesce ("N more of the same in the

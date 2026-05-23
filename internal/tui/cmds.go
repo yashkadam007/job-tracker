@@ -2,6 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -115,4 +119,72 @@ func snoozeCmd(pool *pgxpool.Pool, jobID string) tea.Cmd {
 // auto-dismiss the transient error line.
 func clearErrAfter(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return clearErrMsg{} })
+}
+
+// skipCountResult is one row of the status panel — the result of
+// fetching a single consumer's /skip-count endpoint (ADR 0006).
+type skipCountResult struct {
+	endpoint AdminEndpoint
+	total    int
+	byClass  map[string]int
+	err      error
+}
+
+type skipCountsLoadedMsg struct {
+	results []skipCountResult
+}
+
+// fetchSkipCountsCmd hits every configured admin /skip-count endpoint
+// in parallel with a short timeout. The TUI is allowed to render a
+// stale view if one consumer is unreachable — that itself is a useful
+// signal to the operator. Results come back in the same order as the
+// configured endpoints so the panel is stable across refreshes.
+func fetchSkipCountsCmd(endpoints []AdminEndpoint) tea.Cmd {
+	return func() tea.Msg {
+		results := make([]skipCountResult, len(endpoints))
+		var wg sync.WaitGroup
+		for i, ep := range endpoints {
+			wg.Add(1)
+			go func(i int, ep AdminEndpoint) {
+				defer wg.Done()
+				results[i] = fetchSkipCount(ep)
+			}(i, ep)
+		}
+		wg.Wait()
+		return skipCountsLoadedMsg{results: results}
+	}
+}
+
+func fetchSkipCount(ep AdminEndpoint) skipCountResult {
+	out := skipCountResult{endpoint: ep}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.URL, nil)
+	if err != nil {
+		out.err = err
+		return out
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		out.err = err
+		return out
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out.err = fmt.Errorf("http %d", resp.StatusCode)
+		return out
+	}
+	var body struct {
+		Count   int            `json:"count"`
+		ByClass map[string]int `json:"by_class"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		out.err = err
+		return out
+	}
+	out.total = body.Count
+	out.byClass = body.ByClass
+	return out
 }

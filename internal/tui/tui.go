@@ -16,6 +16,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,11 +30,24 @@ import (
 	"job-tracker/internal/jobclient"
 )
 
+
 // Config bundles wired dependencies. Build in main(), pass to New.
 type Config struct {
 	Publisher *jobclient.Publisher
 	Reader    *jobclient.Reader
 	Pool      *pgxpool.Pool
+
+	// AdminEndpoints is the list of consumer-side admin /skip-count
+	// endpoints surfaced by ADR 0006. The status panel fetches each
+	// one on entry. Empty slice = panel renders a "not configured"
+	// hint instead of trying.
+	AdminEndpoints []AdminEndpoint
+}
+
+// AdminEndpoint names a consumer's /skip-count surface.
+type AdminEndpoint struct {
+	Name string // "store", "scheduler"
+	URL  string // "http://homeserver:9090/skip-count"
 }
 
 // mode enumerates which sub-UI owns keystrokes right now. list is the
@@ -45,6 +59,7 @@ const (
 	modeList mode = iota
 	modeNew
 	modeSearch
+	modeStatus
 )
 
 // newStep tracks which field of the new-job form the user is filling.
@@ -88,6 +103,11 @@ type Model struct {
 	// search
 	search     textinput.Model
 	searchTerm string
+
+	// status panel (ADR 0006). Lazy-fetched on entry to modeStatus.
+	statusLoading bool
+	statusResults []skipCountResult
+	statusFetched time.Time
 
 	loading bool
 	err     string
@@ -228,6 +248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = ""
 		return m, nil
 
+	case skipCountsLoadedMsg:
+		m.statusLoading = false
+		m.statusResults = msg.results
+		m.statusFetched = time.Now()
+		return m, nil
+
 	case errMsg:
 		m.err = msg.err.Error()
 		return m, clearErrAfter(4 * time.Second)
@@ -244,6 +270,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewKey(msg)
 	case modeSearch:
 		return m.handleSearchKey(msg)
+	case modeStatus:
+		return m.handleStatusKey(msg)
 	}
 
 	// modeList
@@ -302,6 +330,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// shift-r — explicit reload.
 		m.loading = true
 		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
+	case "H":
+		// ADR 0006 status panel — fetches each consumer's /skip-count
+		// and surfaces non-zero values. Toggle on H; esc returns to list.
+		m.mode = modeStatus
+		m.statusLoading = true
+		m.statusResults = nil
+		return m, fetchSkipCountsCmd(m.cfg.AdminEndpoints)
 	}
 
 	var cmd tea.Cmd
@@ -377,6 +412,21 @@ func currentStepValue(m *Model, s newStep) string {
 		return m.newCompany
 	}
 	return ""
+}
+
+// handleStatusKey owns input while the ADR 0006 skip-count panel is
+// open. esc/q returns to the list; H or r re-runs the fetch.
+func (m Model) handleStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "H":
+		m.mode = modeList
+		return m, nil
+	case "r", "R":
+		m.statusLoading = true
+		m.statusResults = nil
+		return m, fetchSkipCountsCmd(m.cfg.AdminEndpoints)
+	}
+	return m, nil
 }
 
 func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -504,6 +554,9 @@ func (m Model) View() string {
 	if m.mode == modeNew {
 		return m.viewNew()
 	}
+	if m.mode == modeStatus {
+		return m.viewStatus()
+	}
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("jobtracker — desktop triage"))
@@ -572,9 +625,77 @@ func (m Model) viewHelp() string {
 	keys := []string{
 		"a=applied", "i=interview", "o=offer", "r=rejected", "w=withdrawn",
 		"S=saved", "s=snooze1d", "n=new", "/=search", "f=filter", "R=reload",
-		"q=quit",
+		"H=health", "q=quit",
 	}
 	return helpStyle.Render(strings.Join(keys, "  "))
+}
+
+// viewStatus renders the ADR 0006 skip-count panel. Each consumer's
+// row shows its total and the by-class breakdown; any non-zero value
+// is rendered in red to flag "go look at the logs".
+func (m Model) viewStatus() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("consumer health — skip counts (ADR 0006)"))
+	b.WriteString("\n\n")
+
+	if len(m.cfg.AdminEndpoints) == 0 {
+		b.WriteString(helpStyle.Render("no admin endpoints configured — set JOB_TRACKER_ADMIN_ENDPOINTS"))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("esc=back  r=reload"))
+		return b.String()
+	}
+	if m.statusLoading {
+		b.WriteString(helpStyle.Render("fetching…"))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("esc=back"))
+		return b.String()
+	}
+
+	for _, r := range m.statusResults {
+		b.WriteString(titleStyle.Render(r.endpoint.Name))
+		b.WriteString("  ")
+		b.WriteString(helpStyle.Render(r.endpoint.URL))
+		b.WriteString("\n")
+		switch {
+		case r.err != nil:
+			b.WriteString(errStyle.Render("  error: " + r.err.Error()))
+			b.WriteString("\n")
+		default:
+			b.WriteString("  total: ")
+			b.WriteString(countStyle(r.total).Render(fmt.Sprintf("%d", r.total)))
+			b.WriteString("\n")
+			// Stable ordering — iterate sorted keys
+			keys := make([]string, 0, len(r.byClass))
+			for k := range r.byClass {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				v := r.byClass[k]
+				b.WriteString("    ")
+				b.WriteString(detailLabel.Render(fmt.Sprintf("%-22s", k)))
+				b.WriteString(countStyle(v).Render(fmt.Sprintf("%d", v)))
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if !m.statusFetched.IsZero() {
+		b.WriteString(helpStyle.Render("fetched " + m.statusFetched.Local().Format(time.RFC822)))
+		b.WriteString("\n")
+	}
+	b.WriteString(helpStyle.Render("esc=back  r=reload"))
+	return b.String()
+}
+
+// countStyle picks the colour for a count value: red when non-zero
+// (the operator-attention signal per ADR 0006), grey when zero.
+func countStyle(n int) lipgloss.Style {
+	if n > 0 {
+		return errStyle
+	}
+	return helpStyle
 }
 
 func (m Model) viewNew() string {

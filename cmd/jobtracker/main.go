@@ -48,9 +48,10 @@ func main() {
 	reader := jobclient.NewReader(pool)
 
 	m := tui.New(tui.Config{
-		Publisher: pub,
-		Reader:    reader,
-		Pool:      pool,
+		Publisher:      pub,
+		Reader:         reader,
+		Pool:           pool,
+		AdminEndpoints: adminEndpoints(),
 	})
 
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
@@ -77,4 +78,23 @@ func dsn() string {
 		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
 	}
 	return d
+}
+
+// adminEndpoints surfaces the consumer-side /skip-count endpoints
+// introduced in ADR 0006. Defaults to the localhost ports exposed by
+// compose; override with JOB_TRACKER_ADMIN_HOST when the consumers
+// live on the home server reached over Tailscale.
+//
+// Format: host:port[,host:port,…] paired with consumer names in
+// fixed order (store, scheduler). For the simple single-host case,
+// just set JOB_TRACKER_ADMIN_HOST to the tailnet hostname.
+func adminEndpoints() []tui.AdminEndpoint {
+	host := os.Getenv("JOB_TRACKER_ADMIN_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	return []tui.AdminEndpoint{
+		{Name: "store", URL: fmt.Sprintf("http://%s:9090/skip-count", host)},
+		{Name: "scheduler", URL: fmt.Sprintf("http://%s:9091/skip-count", host)},
+	}
 }

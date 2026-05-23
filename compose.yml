@@ -84,6 +84,13 @@ services:
     build: .
     container_name: job-tracker-store
     command: [store]
+    # 9090 is the ADR 0006 admin server (/skip-count, /healthz). Bound
+    # to the host's loopback only — "no external exposure" per the ADR.
+    # The TUI on the same host reaches it directly; to reach it from
+    # the operator's laptop over Tailscale, run `tailscale serve` on
+    # the home server to expose 127.0.0.1:9090 to the tailnet.
+    ports:
+      - "127.0.0.1:9090:9090"
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       DATABASE_URL: postgres://jobtracker:jobtracker@postgres:5432/jobtracker?sslmode=disable
@@ -98,6 +105,9 @@ services:
     build: .
     container_name: job-tracker-scheduler
     command: [scheduler]
+    # 9091 — admin server, same shape as store (ADR 0006).
+    ports:
+      - "127.0.0.1:9091:9091"
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       DATABASE_URL: postgres://jobtracker:jobtracker@postgres:5432/jobtracker?sslmode=disable

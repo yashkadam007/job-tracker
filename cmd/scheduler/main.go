@@ -13,6 +13,10 @@
 // Note that two services (Store and Scheduler) are reading the same
 // Kafka topics. Because they're in *different* consumer groups, each
 // gets the full stream — that's how Kafka does fan-out.
+//
+// Error handling (ADR 0006): same shape as cmd/store — classify each
+// per-record error, retry infra indefinitely, structured-log + count
+// permanent skips, fail fast on the unclassified default.
 package main
 
 import (
@@ -23,6 +27,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,10 +35,13 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/consumeradmin"
 	"job-tracker/internal/db"
 	"job-tracker/internal/events"
 	"job-tracker/internal/scheduler"
 )
+
+const adminAddr = "0.0.0.0:9091"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -83,11 +91,19 @@ func main() {
 	}
 	defer prod.Close()
 
+	counter := consumeradmin.NewSkipCounter()
+	admin := consumeradmin.NewServer(adminAddr, counter, scheduler.SkipClasses)
+	go func() {
+		if err := admin.Run(ctx); err != nil {
+			log.Printf("scheduler: admin server exited: %v", err)
+		}
+	}()
+
 	pollInterval := envDuration("REMINDER_POLL", 30*time.Second)
-	log.Printf("scheduler: group=%s, saved=%s, applied=%s, poll=%s, snap=%dh %s",
+	log.Printf("scheduler: group=%s, saved=%s, applied=%s, poll=%s, snap=%dh %s, admin=%s",
 		scheduler.Consumer, envDuration("REMINDER_SAVED", 7*24*time.Hour),
 		envDuration("REMINDER_APPLIED", 14*24*time.Hour), pollInterval,
-		snapHour, loc)
+		snapHour, loc, adminAddr)
 
 	// Tick loop: independent goroutine that fires due reminders.
 	go runTicker(ctx, sch, prod, pollInterval)
@@ -106,8 +122,7 @@ func main() {
 		}
 
 		fetches.EachRecord(func(r *kgo.Record) {
-			if err := handle(ctx, sch, r); err != nil {
-				log.Printf("handle error topic=%s offset=%d: %v", r.Topic, r.Offset, err)
+			if err := processRecord(ctx, sch, counter, r); err != nil {
 				return
 			}
 			cl.MarkCommitRecords(r)
@@ -121,12 +136,51 @@ func main() {
 	}
 }
 
+func processRecord(ctx context.Context, sch *scheduler.Scheduler, counter *consumeradmin.SkipCounter, r *kgo.Record) error {
+	label := fmt.Sprintf("scheduler handle topic=%s offset=%d", r.Topic, r.Offset)
+
+	err := consumeradmin.RetryInfra(ctx, label,
+		func(e error) bool { return scheduler.Classify(e) == scheduler.ClassInfra },
+		func() error { return safeHandle(ctx, sch, r) },
+	)
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	switch class := scheduler.Classify(err); class {
+	case scheduler.ClassNone:
+		return nil
+	case scheduler.ClassDecode, scheduler.ClassUnknownTopic, scheduler.ClassConstraint:
+		consumeradmin.LogSkip(r.Topic, r.Partition, r.Offset, class.String(), err, r.Value)
+		counter.Inc(class.String())
+		return nil
+	case scheduler.ClassInfra:
+		return err
+	default:
+		consumeradmin.LogSkip(r.Topic, r.Partition, r.Offset, class.String(), err, r.Value)
+		log.Fatalf("scheduler: unclassified error, crashing: %v", err)
+		return err
+	}
+}
+
+func safeHandle(ctx context.Context, sch *scheduler.Scheduler, r *kgo.Record) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			panicErr := fmt.Errorf("scheduler: panic: %v\n%s", p, debug.Stack())
+			consumeradmin.LogSkip(r.Topic, r.Partition, r.Offset, "panic", panicErr, r.Value)
+			log.Fatalf("scheduler: recovered panic, crashing: %v", p)
+		}
+	}()
+	return handle(ctx, sch, r)
+}
+
 func handle(ctx context.Context, sch *scheduler.Scheduler, r *kgo.Record) error {
 	switch r.Topic {
 	case events.TopicJobSubmitted:
 		var ev events.JobSubmitted
 		if err := json.Unmarshal(r.Value, &ev); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", scheduler.ErrDecode, err)
 		}
 		applied, err := sch.HandleSubmitted(ctx, ev)
 		if err != nil {
@@ -138,14 +192,14 @@ func handle(ctx context.Context, sch *scheduler.Scheduler, r *kgo.Record) error 
 	case events.TopicJobStatusChanged:
 		var ev events.JobStatusChanged
 		if err := json.Unmarshal(r.Value, &ev); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", scheduler.ErrDecode, err)
 		}
 		if _, err := sch.HandleStatusChanged(ctx, ev); err != nil {
 			return err
 		}
 		log.Printf("reminders updated for %s (%s)", ev.JobID, ev.Status)
 	default:
-		return errors.New("unknown topic: " + r.Topic)
+		return fmt.Errorf("%w: %s", scheduler.ErrUnknownTopic, r.Topic)
 	}
 	return nil
 }

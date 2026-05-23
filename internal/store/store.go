@@ -41,7 +41,7 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (applied bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -49,7 +49,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, nil
 		}
-		return false, err
+		return false, wrapDBError(err)
 	}
 
 	techTags := ev.TechTags
@@ -115,7 +115,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 		ev.Priority, customTags,
 	)
 	if err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 
 	// Initial status-history row. event_id UNIQUE makes the replay path
@@ -125,10 +125,10 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
     `, ev.JobID, string(ev.Status), ev.SubmittedAt, ev.EventID); err != nil {
-		return false, err
+		return false, wrapDBError(err)
 	}
 
-	return true, tx.Commit(ctx)
+	return true, wrapDBError(tx.Commit(ctx))
 }
 
 // ApplyStatusChanged updates the status of an existing job and appends
@@ -137,7 +137,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -145,7 +145,7 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, false, nil
 		}
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 
 	ct, err := tx.Exec(ctx, `
@@ -155,12 +155,12 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
          WHERE job_id = $1
     `, ev.JobID, string(ev.Status), ev.ChangedAt)
 	if err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	if ct.RowsAffected() == 0 {
 		// Don't write a history row for a job we don't have; the FK
 		// would reject it anyway. Let the caller log and move on.
-		return true, true, tx.Commit(ctx)
+		return true, true, wrapDBError(tx.Commit(ctx))
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -168,10 +168,10 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
     `, ev.JobID, string(ev.Status), ev.ChangedAt, ev.EventID); err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 
-	return true, false, tx.Commit(ctx)
+	return true, false, wrapDBError(tx.Commit(ctx))
 }
 
 // ApplyNoteAdded appends a note to a job's timeline. missing=true if
@@ -179,7 +179,7 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
 func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -187,15 +187,15 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, false, nil
 		}
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE job_id = $1)`, ev.JobID).Scan(&exists); err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	if !exists {
-		return true, true, tx.Commit(ctx)
+		return true, true, wrapDBError(tx.Commit(ctx))
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -203,9 +203,9 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
     `, ev.JobID, ev.Body, ev.CreatedAt, ev.EventID); err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
-	return true, false, tx.Commit(ctx)
+	return true, false, wrapDBError(tx.Commit(ctx))
 }
 
 // ApplyInterviewRecorded upserts an interview row keyed by interview_id.
@@ -216,7 +216,7 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
 func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobInterviewRecorded) (applied bool, missing bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -224,15 +224,15 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 		if errors.Is(err, db.ErrAlreadyProcessed) {
 			return false, false, nil
 		}
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE job_id = $1)`, ev.JobID).Scan(&exists); err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 	if !exists {
-		return true, true, tx.Commit(ctx)
+		return true, true, wrapDBError(tx.Commit(ctx))
 	}
 
 	// round is NOT NULL in the table. On insert it must be present; on
@@ -265,10 +265,10 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 		interviewers,
 		nullableStr(ev.Notes),
 	); err != nil {
-		return false, false, err
+		return false, false, wrapDBError(err)
 	}
 
-	return true, false, tx.Commit(ctx)
+	return true, false, wrapDBError(tx.Commit(ctx))
 }
 
 // nullableStr maps "" to a SQL NULL. The CHECK-constrained enum columns
