@@ -14,6 +14,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -71,11 +72,18 @@ type Model struct {
 
 	mode mode
 
-	// new-job modal
-	newStep   newStep
-	newInput  textinput.Model
-	newURL    string
-	newTitle  string
+	// new-job modal. Field values persist across a submit so a
+	// validation failure can reopen the form with the same input and
+	// focus the offending step.
+	newStep    newStep
+	newInput   textinput.Model
+	newURL     string
+	newTitle   string
+	newCompany string
+	// newErr is the producer-side validation message, rendered as a
+	// red banner above the form. Sticky — cleared on next successful
+	// submit, modal-close, or modal-open.
+	newErr string
 
 	// search
 	search     textinput.Model
@@ -192,9 +200,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case submittedMsg:
 		if msg.err != nil {
+			if jobclient.IsValidationError(msg.err) {
+				// Producer-side rejection (ADR 0005): reopen the form,
+				// banner with the validator's message, focus the
+				// offending field. No override — user must correct or
+				// cancel.
+				m.mode = modeNew
+				m.newErr = msg.err.Error()
+				m.newStep = stepForValidationError(msg.err)
+				m.newInput.SetValue(currentStepValue(&m, m.newStep))
+				m.newInput.Focus()
+				return m, textinput.Blink
+			}
 			m.err = "submit: " + msg.err.Error()
 			return m, clearErrAfter(4 * time.Second)
 		}
+		// Successful publish — reset modal scratch state so the next /n
+		// starts clean.
+		m.newURL, m.newTitle, m.newCompany, m.newErr = "", "", "", ""
 		// Re-query so the new row appears once the Store consumer has
 		// processed the event. There's a small race here — if the
 		// reload arrives before the consumer commits, the row is
@@ -232,6 +255,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newStep = stepURL
 		m.newURL = ""
 		m.newTitle = ""
+		m.newCompany = ""
+		m.newErr = ""
 		m.newInput.SetValue("")
 		m.newInput.Placeholder = "https://…"
 		m.newInput.Focus()
@@ -289,6 +314,7 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.mode = modeList
 		m.newInput.Blur()
+		m.newErr = ""
 		return m, nil
 	case "enter":
 		val := strings.TrimSpace(m.newInput.Value())
@@ -299,17 +325,18 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case stepURL:
 			m.newURL = val
 			m.newStep = stepTitle
-			m.newInput.SetValue("")
+			m.newInput.SetValue(m.newTitle)
 			m.newInput.Placeholder = "Senior Software Engineer"
 			return m, nil
 		case stepTitle:
 			m.newTitle = val
 			m.newStep = stepCompany
-			m.newInput.SetValue("")
+			m.newInput.SetValue(m.newCompany)
 			m.newInput.Placeholder = "Acme Corp"
 			return m, nil
 		case stepCompany:
-			cmd := submitCmd(m.cfg.Publisher, m.newURL, m.newTitle, val)
+			m.newCompany = val
+			cmd := submitCmd(m.cfg.Publisher, m.newURL, m.newTitle, m.newCompany)
 			m.mode = modeList
 			m.newInput.Blur()
 			return m, cmd
@@ -318,6 +345,38 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.newInput, cmd = m.newInput.Update(msg)
 	return m, cmd
+}
+
+// stepForValidationError maps a producer-side validation sentinel back
+// to the form field that produced it, so the modal can reopen with
+// focus on the offending step. Any unrecognised sentinel falls back to
+// stepURL — the earliest step — so the user retraces from the top.
+func stepForValidationError(err error) newStep {
+	switch {
+	case errors.Is(err, jobclient.ErrMissingURL),
+		errors.Is(err, jobclient.ErrInvalidURL):
+		return stepURL
+	case errors.Is(err, jobclient.ErrMissingTitle):
+		return stepTitle
+	case errors.Is(err, jobclient.ErrMissingCompany):
+		return stepCompany
+	}
+	return stepURL
+}
+
+// currentStepValue returns the in-model value for the given step, so
+// the textinput can be pre-populated when the form reopens after a
+// validation failure.
+func currentStepValue(m *Model, s newStep) string {
+	switch s {
+	case stepURL:
+		return m.newURL
+	case stepTitle:
+		return m.newTitle
+	case stepCompany:
+		return m.newCompany
+	}
+	return ""
 }
 
 func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -528,7 +587,11 @@ func (m Model) viewNew() string {
 	case stepCompany:
 		label = fmt.Sprintf("new job — company  (%s)", truncate(m.newTitle, 50))
 	}
-	body := titleStyle.Render(label) + "\n\n" + m.newInput.View() + "\n\n" +
+	var banner string
+	if m.newErr != "" {
+		banner = errStyle.Render(m.newErr) + "\n\n"
+	}
+	body := banner + titleStyle.Render(label) + "\n\n" + m.newInput.View() + "\n\n" +
 		helpStyle.Render("enter=next  esc=cancel")
 	return modalBox.Render(body)
 }

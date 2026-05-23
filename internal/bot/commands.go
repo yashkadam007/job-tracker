@@ -120,6 +120,10 @@ func (b *Bot) publishAdd(ctx context.Context, p *pendingJob) {
 	pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := b.cfg.Publisher.Submit(pubCtx, ev); err != nil {
+		if jobclient.IsValidationError(err) {
+			b.reply(ctx, err.Error())
+			return
+		}
 		log.Printf("bot: publish JobSubmitted: %v", err)
 		b.reply(ctx, "Failed to save: "+err.Error())
 		return
@@ -195,6 +199,10 @@ func (b *Bot) publishStatus(ctx context.Context, jobID string, status events.Job
 	pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := b.cfg.Publisher.ChangeStatus(pubCtx, ev); err != nil {
+		if jobclient.IsValidationError(err) {
+			b.reply(ctx, err.Error())
+			return
+		}
 		log.Printf("bot: publish JobStatusChanged: %v", err)
 		b.reply(ctx, "Failed to update status: "+err.Error())
 	}

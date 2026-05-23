@@ -52,18 +52,28 @@ func (p *Publisher) Close() error {
 	return flushErr
 }
 
-// Submit publishes a JobSubmitted event.
+// Submit publishes a JobSubmitted event. The event is validated first;
+// on validation failure no Kafka produce is attempted (ADR 0005).
 func (p *Publisher) Submit(ctx context.Context, ev events.JobSubmitted) error {
+	if err := validateSubmitted(ev); err != nil {
+		return err
+	}
 	return p.produce(ctx, events.TopicJobSubmitted, ev.JobID, ev)
 }
 
 // ChangeStatus publishes a JobStatusChanged event.
 func (p *Publisher) ChangeStatus(ctx context.Context, ev events.JobStatusChanged) error {
+	if err := validateStatusChanged(ev); err != nil {
+		return err
+	}
 	return p.produce(ctx, events.TopicJobStatusChanged, ev.JobID, ev)
 }
 
 // AddNote publishes a JobNoteAdded event.
 func (p *Publisher) AddNote(ctx context.Context, ev events.JobNoteAdded) error {
+	if err := validateNoteAdded(ev); err != nil {
+		return err
+	}
 	return p.produce(ctx, events.TopicJobNoteAdded, ev.JobID, ev)
 }
 
@@ -71,6 +81,9 @@ func (p *Publisher) AddNote(ctx context.Context, ev events.JobNoteAdded) error {
 // topic carries both "schedule" and "complete/update" shapes — the
 // Store upserts on interview_id with a COALESCE pattern.
 func (p *Publisher) RecordInterview(ctx context.Context, ev events.JobInterviewRecorded) error {
+	if err := validateInterviewRecorded(ev); err != nil {
+		return err
+	}
 	return p.produce(ctx, events.TopicJobInterviewRecorded, ev.JobID, ev)
 }
 

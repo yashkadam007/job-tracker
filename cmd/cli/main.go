@@ -236,7 +236,7 @@ func cmdAdd(pub *jobclient.Publisher, args []string) {
 	ctx, cancel := publishCtx()
 	defer cancel()
 	if err := pub.Submit(ctx, ev); err != nil {
-		log.Fatalf("publish: %v", err)
+		failPublish(err)
 	}
 	fmt.Printf("published: %s @ %s (%s)\n", ev.Title, ev.Company, ev.Status)
 	fmt.Printf("job_id: %s\n", ev.JobID)
@@ -257,7 +257,7 @@ func cmdStatus(pub *jobclient.Publisher, args []string) {
 	ctx, cancel := publishCtx()
 	defer cancel()
 	if err := pub.ChangeStatus(ctx, ev); err != nil {
-		log.Fatalf("publish: %v", err)
+		failPublish(err)
 	}
 	fmt.Printf("status changed: %s → %s\n", ev.JobID, ev.Status)
 }
@@ -296,7 +296,7 @@ func cmdNoteAdd(pub *jobclient.Publisher, args []string) {
 	ctx, cancel := publishCtx()
 	defer cancel()
 	if err := pub.AddNote(ctx, ev); err != nil {
-		log.Fatalf("publish: %v", err)
+		failPublish(err)
 	}
 	fmt.Printf("note added: %s\n", ev.JobID)
 }
@@ -350,7 +350,7 @@ func cmdInterviewSchedule(pub *jobclient.Publisher, args []string) {
 	ctx, cancel := publishCtx()
 	defer cancel()
 	if err := pub.RecordInterview(ctx, ev); err != nil {
-		log.Fatalf("publish: %v", err)
+		failPublish(err)
 	}
 	fmt.Printf("interview scheduled: %s (round=%s)\n", ev.JobID, ev.Round)
 	fmt.Printf("interview_id: %s\n", ev.InterviewID)
@@ -406,7 +406,7 @@ func cmdInterviewUpdate(pub *jobclient.Publisher, args []string) {
 	ctx, cancel := publishCtx()
 	defer cancel()
 	if err := pub.RecordInterview(ctx, ev); err != nil {
-		log.Fatalf("publish: %v", err)
+		failPublish(err)
 	}
 	fmt.Printf("interview updated: %s\n", ev.InterviewID)
 }
@@ -416,6 +416,20 @@ func cmdInterviewUpdate(pub *jobclient.Publisher, args []string) {
 // publish round trip.
 func publishCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 10*time.Second)
+}
+
+// failPublish exits the CLI on a Publisher error. Producer-side
+// validation failures (ADR 0005) get a clean "error: <msg>" line on
+// stderr — the user's input was bad and the message names the fix.
+// Anything else falls through to log.Fatalf, which keeps the timestamp
+// and "publish:" prefix appropriate for operator-facing failures
+// (Kafka unreachable, marshal error, etc.).
+func failPublish(err error) {
+	if jobclient.IsValidationError(err) {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	log.Fatalf("publish: %v", err)
 }
 
 // stringSlice collects repeated --flag values into a slice.
