@@ -1,11 +1,11 @@
-// Package db owns the Postgres connection pool and the schema. Every
-// service calls Connect on startup to get a pool with the schema
-// applied — the schema statements are idempotent.
+// Package db owns the Postgres connection pool and the cross-consumer
+// idempotency helper. Schema is owned by the migrations directory
+// (internal/db/migrations) and applied out-of-band by `make migrate-up`
+// — Connect no longer mutates the database (ADR 0009).
 package db
 
 import (
 	"context"
-	_ "embed"
 	"errors"
 	"fmt"
 
@@ -13,17 +13,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-//go:embed schema.sql
-var SchemaSQL string
-
+// Connect opens a pgx pool against dsn. The schema must already have
+// been applied by `make migrate-up`; the first query against a
+// pre-migration DB will fail loudly ("column X does not exist"), which
+// is the operator's signal to run the migration.
 func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pgxpool: %w", err)
-	}
-	if _, err := pool.Exec(ctx, SchemaSQL); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	return pool, nil
 }

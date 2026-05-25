@@ -72,6 +72,48 @@ You should see one cluster ("job-tracker"), no topics yet.
 
 ---
 
+## 2a. Apply schema migrations
+
+Services no longer apply the schema on boot (ADR 0009) — they expect
+a database already at the latest version. Apply the migrations now:
+
+```bash
+make migrate-up                          # fresh DB: applies everything
+make migrate-version                     # confirm: prints the current version
+```
+
+`make migrate-up` reads `DATABASE_URL` from your shell or `.env`; the
+default (matching `internal/config`) hits
+`localhost:5432`, which is where compose just bound Postgres. Override
+with `DATABASE_URL=… make migrate-up` to target a different DB.
+
+If you don't have `golang-migrate` on your PATH, the Makefile transparently
+falls back to running it via the `docker.io/migrate/migrate:latest`
+image. To install the binary instead:
+
+```bash
+brew install golang-migrate              # macOS
+# or: https://github.com/golang-migrate/migrate/releases
+```
+
+> **Bootstrapping a pre-existing DB.** If you're adopting migrations
+> against a database that already has the schema applied (e.g. the
+> home-server Postgres from before this ADR), do **not** run
+> `migrate-up` — it would try to re-execute the init migration and
+> error on existing objects. Instead, mark init as applied without
+> running it:
+>
+> ```bash
+> pg_dump <DATABASE_URL> > pre-migration-backup.sql   # belt-and-braces
+> make migrate-force VERSION=20260525110139
+> make migrate-version                                # confirms 20260525110139
+> ```
+>
+> One-time per environment; afterwards, future `*.up.sql` files apply
+> with the normal `make migrate-up`.
+
+---
+
 ## 3. Create topics
 
 ```bash
@@ -404,14 +446,21 @@ Three things to check, in order:
 
 That's expected behaviour, printed as `exists: <topic>`. Not an error.
 
-### `reminders` won't create on an old DB volume
+### Services crash with "relation \"jobs\" does not exist" / similar
 
-The schema now declares `reminders.job_id REFERENCES jobs(job_id)`.
-`CREATE TABLE IF NOT EXISTS` is a no-op against a pre-existing
-`reminders` table that lacks the FK (or that still keys on `url`),
-so the new shape silently doesn't land. This is greenfield (per
-ADR 0001) — wipe and recreate:
-`podman-compose down -v && podman-compose up -d`.
+You skipped §2a. Run `make migrate-up` against the same `DATABASE_URL`
+the services use, then restart them.
+
+### Schema drift on a long-lived dev DB
+
+If a local DB is on an older schema and you don't care about its data,
+the cleanest reset is `make migrate-down-all && make migrate-up`. The
+heavier option is `podman-compose down -v && podman-compose up -d`
+(also drops Kafka logs).
+
+For a DB whose data you do want to keep, the schema only changes via
+a new `*.up.sql` file — never by editing an existing one — so write
+the migration, ship the PR, and run `make migrate-up`.
 
 ### Want to clear a single consumer group's offset?
 
@@ -789,11 +838,27 @@ After the first-time setup above:
 cd ~/job-tracker
 git pull
 podman-compose build           # only if code changed
+make migrate-up                # only if internal/db/migrations/ changed
 podman-compose up -d           # brings up everything (infra + services)
 # then use the CLI as needed:
 podman-compose run --rm --no-deps cli add --url ... --title ... --company ...
 # or just talk to the bot in Telegram.
 ```
+
+### Adding a schema change
+
+```bash
+make migrate-new NAME=add_jobs_owner
+$EDITOR internal/db/migrations/<ts>_add_jobs_owner.up.sql
+$EDITOR internal/db/migrations/<ts>_add_jobs_owner.down.sql
+make migrate-up                # local DB
+# open PR; reviewer reads the diff; merge.
+# then on the server:
+git pull && make migrate-up && podman-compose up -d --force-recreate
+```
+
+Migration files are immutable once merged — never edit an applied
+migration; write a new one to alter the world it created.
 
 `restart: unless-stopped` on the app services means they survive
 reboots once the podman socket is enabled (`systemctl --user enable

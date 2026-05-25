@@ -21,9 +21,42 @@ for the full design (v1 scope + future scope), and
 ```
 job-tracker/
 ├── compose.yml         # Kafka + Postgres + Kafka UI
+├── Makefile            # operator entry point — `make help`
 ├── .env.example        # config template
 └── (services to come)
 ```
+
+## Common commands
+
+A root `Makefile` (ADR 0009) is the single discoverable entry point —
+`make help` lists every target. The ones you'll reach for daily:
+
+```bash
+make up                 # bring up Kafka + Postgres + Kafka UI
+make migrate-up         # apply pending schema migrations
+make test               # go test ./...
+make down               # stop the compose stack
+```
+
+## Schema migrations
+
+The schema lives in `internal/db/migrations/` as timestamped
+`*.up.sql` / `*.down.sql` pairs, applied by the `golang-migrate` CLI
+(via local binary if installed, else the Docker image). Services do
+**not** apply schema on startup — booting against an un-migrated DB
+fails at the first query, which is your signal to run `make migrate-up`.
+
+To add a schema change:
+
+```bash
+make migrate-new NAME=add_jobs_owner    # writes the pair of files
+$EDITOR internal/db/migrations/<ts>_add_jobs_owner.up.sql
+$EDITOR internal/db/migrations/<ts>_add_jobs_owner.down.sql
+make migrate-up                          # against each environment
+```
+
+See `docs/runbook.md` for the prod bootstrap step (`migrate-force`)
+needed once on databases that pre-date this workflow.
 
 ## Running the infra (Podman, on Ubuntu host)
 
