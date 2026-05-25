@@ -81,6 +81,11 @@ services:
       retries: 10
 
   store:
+    # Single shared image for every Go service — same Dockerfile builds
+    # all binaries, the per-service `command:` picks which one runs.
+    # `build:` is declared here only; the others reference `image:` so
+    # `podman-compose build` produces one image instead of five copies.
+    image: localhost/job-tracker:latest
     build: .
     container_name: job-tracker-store
     command: [store]
@@ -102,7 +107,7 @@ services:
         condition: service_healthy
 
   scheduler:
-    build: .
+    image: localhost/job-tracker:latest
     container_name: job-tracker-scheduler
     command: [scheduler]
     # 9091 — admin server, same shape as store (ADR 0006).
@@ -122,7 +127,7 @@ services:
         condition: service_healthy
 
   notifier:
-    build: .
+    image: localhost/job-tracker:latest
     container_name: job-tracker-notifier
     command: [notifier]
     environment:
@@ -135,7 +140,7 @@ services:
         condition: service_healthy
 
   bot:
-    build: .
+    image: localhost/job-tracker:latest
     container_name: job-tracker-bot
     command: [bot]
     environment:
@@ -151,7 +156,7 @@ services:
         condition: service_healthy
 
   cli:
-    build: .
+    image: localhost/job-tracker:latest
     entrypoint: [cli]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092

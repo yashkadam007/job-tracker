@@ -20,6 +20,11 @@ KAFKA_BOOTSTRAP ?= localhost:9092
 MIGRATIONS_DIR  := internal/db/migrations
 COMPOSE         ?= podman-compose
 
+# Services that ship our code (rebuilt and recreated by `make deploy`).
+# Excludes kafka / postgres / kafka-ui — those don't change on a code pull
+# and bouncing them adds latency and volume-init risk for nothing.
+APP_SERVICES    := store scheduler notifier bot
+
 # Prefer a locally-installed `migrate` binary; fall back to the
 # golang-migrate container image via podman so a contributor without
 # the CLI on PATH still gets a working `make migrate-*`. --network=host
@@ -46,7 +51,7 @@ MIGRATE_TS_FORMAT := 20060102150405
   migrate-up migrate-up-one migrate-down-one migrate-down-all \
   migrate-version migrate-force migrate-new \
   build test fmt vet tidy \
-  up down logs restart ps
+  up down logs restart ps deploy
 
 help:
 	@echo "Migrations:"
@@ -60,6 +65,7 @@ help:
 	@echo ""
 	@echo "Build & test:    build  test  fmt  vet  tidy"
 	@echo "Compose:         up  down  logs  restart  ps"
+	@echo "Deploy:          deploy   (pull, build image, migrate, recreate app services)"
 
 # ----- Migrations -----------------------------------------------------
 
@@ -127,3 +133,19 @@ restart:
 
 ps:
 	$(COMPOSE) ps
+
+# ----- Deploy ---------------------------------------------------------
+#
+# In-place release: pull the new code, rebuild the shared image once,
+# apply pending migrations, then recreate just the app containers.
+# Kafka / Postgres / kafka-ui are left running so deploys don't bounce
+# the data plane.
+#
+# Migrate-then-recreate ordering assumes additive schema changes (new
+# columns/tables, no drops the old binary still reads). For destructive
+# migrations, run them by hand after the recreate finishes.
+deploy:
+	git pull --ff-only
+	$(COMPOSE) build store
+	$(MAKE) migrate-up
+	$(COMPOSE) up -d --no-deps --force-recreate $(APP_SERVICES)
