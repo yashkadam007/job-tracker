@@ -143,9 +143,10 @@ func (s *Scheduler) snap(due time.Time) time.Time {
 // in v1, but cheap to support) can split the work without overlap.
 func (s *Scheduler) FetchDue(ctx context.Context, now time.Time, limit int) ([]DueReminder, error) {
 	rows, err := s.pool.Query(ctx, `
-        SELECT r.id, r.job_id, j.url, r.kind, r.due_at, j.title, j.company, j.status
+        SELECT r.id, r.job_id, j.url, r.kind, r.due_at, j.title, c.name, j.status
           FROM reminders r
-          JOIN jobs j ON j.job_id = r.job_id
+          JOIN jobs j      ON j.job_id     = r.job_id
+          JOIN companies c ON c.company_id = j.company_id
          WHERE r.fired_at IS NULL
            AND NOT r.cancelled
            AND r.due_at <= $1

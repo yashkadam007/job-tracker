@@ -29,21 +29,27 @@ func NewReader(pool *pgxpool.Pool) *Reader {
 // the default (last_event_at DESC) so a caller can't drop arbitrary
 // SQL into the ORDER BY clause.
 var orderColumns = map[string]string{
-	"":               "last_event_at",
-	"last_event_at":  "last_event_at",
-	"first_seen_at":  "first_seen_at",
+	"":              "j.last_event_at",
+	"last_event_at": "j.last_event_at",
+	"first_seen_at": "j.first_seen_at",
 }
 
 const defaultListLimit = 100
 
+// jobColumns is the SELECT list for a row in `jobs` joined to its
+// `companies` row (ADR 0010). c.name / c.tags are denormalised into the
+// projection so the list and detail views don't need a second round-trip.
 const jobColumns = `
-    job_id, url, title, company, status, first_seen_at, last_event_at,
-    work_mode, location, seniority, source, tech_tags, description, deadline,
-    comp_min, comp_max, comp_currency, comp_equity, comp_bonus,
-    resume_version, cover_letter_version, referral,
-    recruiter_name, recruiter_email, recruiter_phone,
-    priority, custom_tags
+    j.job_id, j.url, j.title, j.company_id, c.name, c.tags,
+    j.status, j.first_seen_at, j.last_event_at,
+    j.work_mode, j.location, j.seniority, j.source, j.tech_tags, j.description, j.deadline,
+    j.comp_min, j.comp_max, j.comp_currency, j.comp_equity, j.comp_bonus,
+    j.resume_version, j.cover_letter_version, j.referral,
+    j.recruiter_name, j.recruiter_email, j.recruiter_phone,
+    j.priority, j.custom_tags
 `
+
+const jobsFromClause = ` FROM jobs j JOIN companies c ON c.company_id = j.company_id`
 
 // List returns jobs matching filter, most-recent first. Status nil
 // returns every status. Limit ≤ 0 falls back to defaultListLimit.
@@ -57,10 +63,10 @@ func (r *Reader) List(ctx context.Context, f ListFilter) ([]Job, error) {
 		limit = defaultListLimit
 	}
 
-	query := `SELECT ` + jobColumns + ` FROM jobs`
+	query := `SELECT ` + jobColumns + jobsFromClause
 	var args []any
 	if f.Status != nil {
-		query += ` WHERE status = $1`
+		query += ` WHERE j.status = $1`
 		args = append(args, string(*f.Status))
 	}
 	query += fmt.Sprintf(` ORDER BY %s DESC LIMIT $%d`, col, len(args)+1)
@@ -87,7 +93,7 @@ func (r *Reader) List(ctx context.Context, f ListFilter) ([]Job, error) {
 // row exists.
 func (r *Reader) Get(ctx context.Context, url string) (Job, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT `+jobColumns+` FROM jobs WHERE url = $1`, url)
+		`SELECT `+jobColumns+jobsFromClause+` WHERE j.url = $1`, url)
 	j, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -107,9 +113,10 @@ func (r *Reader) PendingReminders(ctx context.Context) ([]PendingReminder, error
 	// jobs without pending reminders are dropped by the WHERE clause.
 	rows, err := r.pool.Query(ctx, `
         SELECT DISTINCT ON (j.job_id)
-               j.job_id, j.url, j.title, j.company, j.status,
+               j.job_id, j.url, j.title, c.name, j.status,
                r.kind, r.due_at
           FROM jobs j
+          JOIN companies c ON c.company_id = j.company_id
      LEFT JOIN reminders r ON r.job_id = j.job_id
                           AND r.fired_at IS NULL
                           AND NOT r.cancelled
@@ -131,6 +138,34 @@ func (r *Reader) PendingReminders(ctx context.Context) ([]PendingReminder, error
 		p.Status = events.JobStatus(status)
 		p.Kind = events.ReminderKind(kind)
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListCompanies returns every row in `companies`, ordered by name.
+// Drives the TUI new-job autocomplete (ADR 0010) and any future
+// companies panel. notes is nullable in the schema; the empty string
+// stands in for SQL NULL on the way out.
+func (r *Reader) ListCompanies(ctx context.Context) ([]Company, error) {
+	rows, err := r.pool.Query(ctx, `
+        SELECT company_id, name, tags, notes
+          FROM companies
+      ORDER BY name
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Company
+	for rows.Next() {
+		var c Company
+		var notes *string
+		if err := rows.Scan(&c.CompanyID, &c.Name, &c.Tags, &notes); err != nil {
+			return nil, err
+		}
+		c.Notes = derefStr(notes)
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
@@ -163,7 +198,8 @@ func scanJob(s scannable) (Job, error) {
 		recruiterPhone     *string
 	)
 	if err := s.Scan(
-		&j.JobID, &j.URL, &j.Title, &j.Company, &status, &j.FirstSeenAt, &j.LastEventAt,
+		&j.JobID, &j.URL, &j.Title, &j.CompanyID, &j.Company, &j.CompanyTags,
+		&status, &j.FirstSeenAt, &j.LastEventAt,
 		&workMode, &location, &seniority, &source, &j.TechTags, &description, &j.Deadline,
 		&j.CompMin, &j.CompMax, &compCurrency, &compEquity, &compBonus,
 		&resumeVersion, &coverLetterVersion, &referral,

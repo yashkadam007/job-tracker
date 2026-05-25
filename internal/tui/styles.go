@@ -2,8 +2,10 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Small palette per ADR 0004 Notes — status colours only. Uses ANSI
-// 256 codes; truecolor terminals upscale automatically.
+// Small palette per ADR 0004 Notes. ANSI 256 codes; truecolor terminals
+// upscale automatically. The screen has one accent (117 cyan) for focus
+// signals (selected-row gutter, filter pill); everything else lives in
+// neutral greys so status colours in the detail panel pop.
 var (
 	statusStyles = map[string]lipgloss.Style{
 		"saved":     lipgloss.NewStyle().Foreground(lipgloss.Color("33")),  // blue
@@ -16,19 +18,18 @@ var (
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("231")).
-			Padding(0, 1)
+			Foreground(lipgloss.Color("231"))
 
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
 	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 
-	pillStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("231")).
-			Background(lipgloss.Color("238")).
-			Padding(0, 1)
+	pillStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 
 	detailLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+	ruleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	gutterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 
 	detailBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).

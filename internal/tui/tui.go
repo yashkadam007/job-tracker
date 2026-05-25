@@ -100,6 +100,14 @@ type Model struct {
 	// submit, modal-close, or modal-open.
 	newErr string
 
+	// Company autocomplete state for stepCompany (ADR 0010). companies
+	// is the full server snapshot loaded once on modeNew entry; matched
+	// is the case-insensitive substring filter against the current
+	// textinput value; companyPick is the index into matched.
+	companies         []jobclient.Company
+	companyMatched    []jobclient.Company
+	companyPick       int
+
 	// search
 	search     textinput.Model
 	searchTerm string
@@ -130,8 +138,7 @@ func New(cfg Config) Model {
 		Bold(true)
 	s.Selected = s.Selected.
 		Foreground(lipgloss.Color("231")).
-		Background(lipgloss.Color("57")).
-		Bold(true)
+		Background(lipgloss.Color("237"))
 	tbl.SetStyles(s)
 
 	ni := textinput.New()
@@ -154,10 +161,13 @@ func New(cfg Config) Model {
 
 func defaultColumns(width int) []table.Column {
 	// status • title • company • last_event
-	// last_event is fixed; status is small; title/company share the rest.
-	statusW := 10
-	lastW := 18
-	rest := width - statusW - lastW - 6 // account for padding/borders
+	// statusW = 11 leaves one space past the widest status ("interview"=9)
+	// so column truncation can't bleed into the title column.
+	// lastW = 16 matches the "2006-01-02 15:04" format.
+	// Reserve 2 chars on the left for the gutter overlay added in tableView.
+	statusW := 11
+	lastW := 16
+	rest := width - statusW - lastW - 6 - 2
 	if rest < 30 {
 		rest = 30
 	}
@@ -171,6 +181,22 @@ func defaultColumns(width int) []table.Column {
 	}
 }
 
+// fmtWhen is the single source of truth for date display. ISO ordering
+// sorts mentally and matches between list and detail.
+func fmtWhen(t time.Time) string {
+	return t.Local().Format("2006-01-02 15:04")
+}
+
+// padRight pads s with trailing spaces to display width n. Used for
+// status cells so the column is always exactly the visible width we
+// asked for — no ANSI in cells means no width-accounting surprises.
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
+}
+
 func (m Model) Init() tea.Cmd {
 	return listJobsCmd(m.cfg.Reader, m.statusFilter)
 }
@@ -181,12 +207,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.tbl.SetColumns(defaultColumns(m.width))
-		// Reserve 8 rows for header, pill, detail, help, error.
-		h := m.height - 14
-		if h < 5 {
-			h = 5
-		}
-		m.tbl.SetHeight(h)
+		m.setTableHeight()
 		return m, nil
 
 	case jobsLoadedMsg:
@@ -248,6 +269,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = ""
 		return m, nil
 
+	case companiesLoadedMsg:
+		// Silent on error — the autocomplete is a nice-to-have, not a
+		// blocker. The operator can still type any string and submit.
+		if msg.err == nil {
+			m.companies = msg.companies
+			m.recomputeCompanyMatches()
+		}
+		return m, nil
+
 	case skipCountsLoadedMsg:
 		m.statusLoading = false
 		m.statusResults = msg.results
@@ -288,7 +318,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newInput.SetValue("")
 		m.newInput.Placeholder = "https://…"
 		m.newInput.Focus()
-		return m, textinput.Blink
+		m.companyMatched = nil
+		m.companyPick = 0
+		return m, tea.Batch(textinput.Blink, listCompaniesCmd(m.cfg.Reader))
 	case "/":
 		m.mode = modeSearch
 		m.search.Focus()
@@ -351,6 +383,21 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newInput.Blur()
 		m.newErr = ""
 		return m, nil
+	case "tab", "shift+tab":
+		// Tab/Shift+Tab cycles the company autocomplete (ADR 0010).
+		// Picking a suggestion fills the input with the canonical
+		// company name; Enter then submits that exact string. Only
+		// active on stepCompany.
+		if m.newStep == stepCompany && len(m.companyMatched) > 0 {
+			delta := 1
+			if msg.String() == "shift+tab" {
+				delta = -1
+			}
+			m.companyPick = (m.companyPick + delta + len(m.companyMatched)) % len(m.companyMatched)
+			m.newInput.SetValue(m.companyMatched[m.companyPick].Name)
+			m.newInput.CursorEnd()
+			return m, nil
+		}
 	case "enter":
 		val := strings.TrimSpace(m.newInput.Value())
 		if val == "" {
@@ -368,6 +415,7 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newStep = stepCompany
 			m.newInput.SetValue(m.newCompany)
 			m.newInput.Placeholder = "Acme Corp"
+			m.recomputeCompanyMatches()
 			return m, nil
 		case stepCompany:
 			m.newCompany = val
@@ -379,7 +427,33 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.newInput, cmd = m.newInput.Update(msg)
+	if m.newStep == stepCompany {
+		m.recomputeCompanyMatches()
+	}
 	return m, cmd
+}
+
+// recomputeCompanyMatches filters the loaded companies list against the
+// current stepCompany input. Case-insensitive substring, capped at 8
+// suggestions so the overlay never grows past the modal. Resets the
+// highlighted pick to the top of the new match set.
+func (m *Model) recomputeCompanyMatches() {
+	const maxSuggestions = 8
+	q := strings.ToLower(strings.TrimSpace(m.newInput.Value()))
+	m.companyMatched = m.companyMatched[:0]
+	if q == "" {
+		m.companyPick = 0
+		return
+	}
+	for _, c := range m.companies {
+		if strings.Contains(strings.ToLower(c.Name), q) {
+			m.companyMatched = append(m.companyMatched, c)
+			if len(m.companyMatched) >= maxSuggestions {
+				break
+			}
+		}
+	}
+	m.companyPick = 0
 }
 
 // stepForValidationError maps a producer-side validation sentinel back
@@ -492,14 +566,40 @@ func (m *Model) applyFilter() {
 	}
 	rows := make([]table.Row, 0, len(m.view))
 	for _, j := range m.view {
+		// Status is plain text in the list (coloured in the detail
+		// panel). Mixing ANSI escapes with bubbles/table column
+		// truncation produced the title-column bleed.
 		rows = append(rows, table.Row{
-			styleStatus(string(j.Status)),
+			padRight(string(j.Status), 9),
 			truncate(j.Title, 60),
 			truncate(j.Company, 30),
-			j.LastEventAt.Local().Format("Jan 02 15:04"),
+			fmtWhen(j.LastEventAt),
 		})
 	}
 	m.tbl.SetRows(rows)
+	m.setTableHeight()
+}
+
+// setTableHeight shrinks the table to the row count when rows fit, so a
+// small result set doesn't strand the detail panel at the bottom of the
+// terminal. Reserves 14 rows for the surrounding chrome (title, pill,
+// three rules, detail block, three-line help, error line).
+func (m *Model) setTableHeight() {
+	if m.height == 0 {
+		return
+	}
+	maxH := m.height - 14
+	if maxH < 3 {
+		maxH = 3
+	}
+	h := len(m.view)
+	if h < 3 {
+		h = 3
+	}
+	if h > maxH {
+		h = maxH
+	}
+	m.tbl.SetHeight(h)
 }
 
 func matchesSearch(j jobclient.Job, term string) bool {
@@ -558,12 +658,20 @@ func (m Model) View() string {
 		return m.viewStatus()
 	}
 
+	w := m.width
+	if w < 40 {
+		w = 40
+	}
+	rule := ruleStyle.Render(strings.Repeat("─", w))
+
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("jobtracker — desktop triage"))
+	b.WriteString(" " + titleStyle.Render("jobtracker — desktop triage"))
 	b.WriteString("\n")
 	b.WriteString(m.pill())
-	b.WriteString("\n\n")
-	b.WriteString(m.tbl.View())
+	b.WriteString("\n")
+	b.WriteString(rule)
+	b.WriteString("\n")
+	b.WriteString(m.tableView())
 	b.WriteString("\n\n")
 	b.WriteString(m.viewDetail())
 	b.WriteString("\n")
@@ -575,22 +683,46 @@ func (m Model) View() string {
 	return b.String()
 }
 
+// tableView wraps tbl.View() with a left gutter: a subtle cyan "▌" on
+// the selected row, blank on every other. Done as post-processing
+// because bubbles/table v0 has no per-row prefix hook — wrapping each
+// rendered line is cheaper than forking the widget.
+func (m Model) tableView() string {
+	raw := m.tbl.View()
+	lines := strings.Split(raw, "\n")
+	// Header (titles) + border line = 2 lines before body, given
+	// Header.BorderBottom(true) in New().
+	const headerLines = 2
+	selRow := -1
+	if len(m.view) > 0 {
+		selRow = headerLines + m.tbl.Cursor()
+	}
+	for i := range lines {
+		if i == selRow && i >= 0 && i < len(lines) {
+			lines[i] = gutterStyle.Render("▌") + " " + lines[i]
+		} else {
+			lines[i] = "  " + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) pill() string {
 	left := "filter: any"
 	if m.statusFilter != nil {
 		left = "filter: " + string(*m.statusFilter)
 	}
-	pill := pillStyle.Render(left)
-	if m.mode == modeSearch {
-		return pill + "  " + m.search.View()
+	pill := pillStyle.Render("[" + left + "]")
+	suffix := helpStyle.Render(fmt.Sprintf("%d jobs", len(m.view)))
+	switch {
+	case m.mode == modeSearch:
+		suffix = m.search.View()
+	case m.searchTerm != "":
+		suffix = helpStyle.Render(fmt.Sprintf("search: %q", m.searchTerm))
+	case m.loading:
+		suffix = helpStyle.Render("loading…")
 	}
-	if m.searchTerm != "" {
-		return pill + "  " + helpStyle.Render(fmt.Sprintf("search: %q", m.searchTerm))
-	}
-	if m.loading {
-		return pill + "  " + helpStyle.Render("loading…")
-	}
-	return pill + "  " + helpStyle.Render(fmt.Sprintf("%d jobs", len(m.view)))
+	return " " + pill + "  " + suffix
 }
 
 func (m Model) viewDetail() string {
@@ -602,7 +734,7 @@ func (m Model) viewDetail() string {
 		fmt.Sprintf("%s  %s", styleStatus(string(job.Status)), titleStyle.Render(job.Title)),
 		detailLabel.Render("company: ") + job.Company,
 		detailLabel.Render("url:     ") + truncate(job.URL, m.detailWidth()-12),
-		detailLabel.Render("last:    ") + job.LastEventAt.Local().Format(time.RFC822),
+		detailLabel.Render("last:    ") + fmtWhen(job.LastEventAt),
 	}
 	if job.Location != "" {
 		lines = append(lines, detailLabel.Render("loc:     ")+job.Location)
@@ -712,7 +844,34 @@ func (m Model) viewNew() string {
 	if m.newErr != "" {
 		banner = errStyle.Render(m.newErr) + "\n\n"
 	}
-	body := banner + titleStyle.Render(label) + "\n\n" + m.newInput.View() + "\n\n" +
-		helpStyle.Render("enter=next  esc=cancel")
+	help := "enter=next  esc=cancel"
+	suggestions := ""
+	if m.newStep == stepCompany {
+		help = "enter=submit  tab=cycle  esc=cancel"
+		suggestions = m.viewCompanySuggestions()
+	}
+	body := banner + titleStyle.Render(label) + "\n\n" + m.newInput.View() + suggestions + "\n\n" +
+		helpStyle.Render(help)
 	return modalBox.Render(body)
+}
+
+// viewCompanySuggestions renders the matched-companies list under the
+// stepCompany input. Empty when there are no matches — the modal then
+// looks identical to the URL/title steps. The highlighted row is the
+// one Tab will fill into the input next. Tag badges are deferred per
+// the ADR 0010 resolved notes.
+func (m Model) viewCompanySuggestions() string {
+	if len(m.companyMatched) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, c := range m.companyMatched {
+		b.WriteString("\n")
+		if i == m.companyPick {
+			b.WriteString(gutterStyle.Render("▌") + " " + c.Name)
+		} else {
+			b.WriteString("  " + c.Name)
+		}
+	}
+	return b.String()
 }

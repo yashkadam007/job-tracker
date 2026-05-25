@@ -43,6 +43,11 @@ type submittedMsg struct {
 	err error
 }
 
+type companiesLoadedMsg struct {
+	companies []jobclient.Company
+	err       error
+}
+
 type errMsg struct{ err error }
 
 // clearErrMsg is delivered on a timer to clear a transient error.
@@ -60,6 +65,18 @@ func listJobsCmd(reader *jobclient.Reader, statusFilter *events.JobStatus) tea.C
 			OrderBy: "last_event_at",
 		})
 		return jobsLoadedMsg{jobs: jobs, err: err}
+	}
+}
+
+// listCompaniesCmd loads the companies list for the new-job modal's
+// stepCompany autocomplete (ADR 0010). Cheap — fired once on modeNew
+// entry, not on every keystroke.
+func listCompaniesCmd(reader *jobclient.Reader) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cs, err := reader.ListCompanies(ctx)
+		return companiesLoadedMsg{companies: cs, err: err}
 	}
 }
 

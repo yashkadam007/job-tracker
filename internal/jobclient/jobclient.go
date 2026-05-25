@@ -19,13 +19,28 @@ import (
 	"job-tracker/internal/events"
 )
 
+// Company is the read-side projection of a row in `companies` (ADR 0010).
+type Company struct {
+	CompanyID string
+	Name      string
+	Tags      []string
+	Notes     string
+}
+
 // Job is the read-side projection of a row in `jobs`. Field names follow
 // the column names so a future HTTP read API can wrap Reader 1:1.
+//
+// Company / CompanyID / CompanyTags come from a join with `companies`
+// (ADR 0010): the column on jobs is company_id, but the display name and
+// tags are denormalised into the projection so list/detail views render
+// without a second round-trip.
 type Job struct {
 	JobID        string
 	URL          string
 	Title        string
+	CompanyID    string
 	Company      string
+	CompanyTags  []string
 	Status       events.JobStatus
 	FirstSeenAt  time.Time
 	LastEventAt  time.Time

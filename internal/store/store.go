@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"job-tracker/internal/db"
@@ -61,9 +62,19 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 		customTags = []string{}
 	}
 
+	// Resolve the event's company name to a companies row (ADR 0010).
+	// Producers don't read Postgres on the write path; the consumer
+	// owns this lookup. ON CONFLICT keeps the existing display name —
+	// first writer picks the casing; re-casing happens via the
+	// companies panel.
+	companyID, err := upsertCompany(ctx, tx, ev.Company)
+	if err != nil {
+		return false, wrapDBError(err)
+	}
+
 	_, err = tx.Exec(ctx, `
         INSERT INTO jobs (
-            job_id, url, title, company, status, first_seen_at, last_event_at,
+            job_id, url, title, company_id, status, first_seen_at, last_event_at,
             work_mode, location, seniority, source, tech_tags, description, deadline,
             comp_min, comp_max, comp_currency, comp_equity, comp_bonus,
             resume_version, cover_letter_version, referral,
@@ -80,7 +91,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
         ON CONFLICT (job_id) DO UPDATE SET
             url                  = EXCLUDED.url,
             title                = EXCLUDED.title,
-            company              = EXCLUDED.company,
+            company_id           = EXCLUDED.company_id,
             status               = EXCLUDED.status,
             last_event_at        = EXCLUDED.last_event_at,
             work_mode            = EXCLUDED.work_mode,
@@ -104,7 +115,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
             priority             = EXCLUDED.priority,
             custom_tags          = EXCLUDED.custom_tags
     `,
-		ev.JobID, ev.URL, ev.Title, ev.Company, string(ev.Status), ev.SubmittedAt,
+		ev.JobID, ev.URL, ev.Title, companyID, string(ev.Status), ev.SubmittedAt,
 		nullableEnum(string(ev.WorkMode)), nullableStr(ev.Location),
 		nullableEnum(string(ev.Seniority)), nullableEnum(string(ev.Source)),
 		techTags, nullableStr(ev.Description), ev.Deadline,
@@ -269,6 +280,25 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 	}
 
 	return true, false, wrapDBError(tx.Commit(ctx))
+}
+
+// upsertCompany resolves a free-text company name to a companies.company_id.
+// The slug expression matches the one used by the ADR 0010 migration
+// backfill verbatim — keeping the normalization in SQL means the
+// consumer and the migration agree on what counts as a duplicate.
+// ON CONFLICT (slug) DO UPDATE is a no-op (SET name = companies.name)
+// purely so RETURNING fires on the existing row as well as a freshly
+// inserted one — first writer keeps the casing.
+func upsertCompany(ctx context.Context, tx pgx.Tx, name string) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `
+        INSERT INTO companies (company_id, name, slug)
+        VALUES (gen_random_uuid()::text, $1,
+                lower(regexp_replace(trim($1), '\s+', ' ', 'g')))
+        ON CONFLICT (slug) DO UPDATE SET name = companies.name
+        RETURNING company_id
+    `, name).Scan(&id)
+	return id, err
 }
 
 // nullableStr maps "" to a SQL NULL. The CHECK-constrained enum columns
