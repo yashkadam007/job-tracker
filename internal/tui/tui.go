@@ -584,18 +584,25 @@ func (m *Model) applyFilter() {
 // small result set doesn't strand the detail panel at the bottom of the
 // terminal. Reserves 14 rows for the surrounding chrome (title, pill,
 // three rules, detail block, three-line help, error line).
+//
+// SetHeight in bubbles/table v1.0.0 sets viewport.Height to
+// (h - headersView.Height). Our header has a bottom border, so its
+// height is 2 — meaning the desired height must include those 2 lines
+// or rows get clipped (e.g. asking for 3 yielded a 1-row viewport).
 func (m *Model) setTableHeight() {
 	if m.height == 0 {
 		return
 	}
+	const headerH = 2
 	maxH := m.height - 14
-	if maxH < 3 {
-		maxH = 3
+	if maxH < headerH+1 {
+		maxH = headerH + 1
 	}
-	h := len(m.view)
-	if h < 3 {
-		h = 3
+	rows := len(m.view)
+	if rows < 1 {
+		rows = 1
 	}
+	h := rows + headerH
 	if h > maxH {
 		h = maxH
 	}
@@ -664,23 +671,37 @@ func (m Model) View() string {
 	}
 	rule := ruleStyle.Render(strings.Repeat("─", w))
 
-	var b strings.Builder
-	b.WriteString(" " + titleStyle.Render("jobtracker — desktop triage"))
-	b.WriteString("\n")
-	b.WriteString(m.pill())
-	b.WriteString("\n")
-	b.WriteString(rule)
-	b.WriteString("\n")
-	b.WriteString(m.tableView())
-	b.WriteString("\n\n")
-	b.WriteString(m.viewDetail())
-	b.WriteString("\n")
-	b.WriteString(m.viewHelp())
+	var top strings.Builder
+	top.WriteString(" " + titleStyle.Render("jobtracker — desktop triage"))
+	top.WriteString("\n")
+	top.WriteString(m.pill())
+	top.WriteString("\n")
+	top.WriteString(rule)
+	top.WriteString("\n")
+	top.WriteString(m.tableView())
+
+	var bottom strings.Builder
+	bottom.WriteString(m.viewDetail())
+	bottom.WriteString("\n")
+	bottom.WriteString(m.viewHelp())
 	if m.err != "" {
-		b.WriteString("\n")
-		b.WriteString(errStyle.Render(m.err))
+		bottom.WriteString("\n")
+		bottom.WriteString(errStyle.Render(m.err))
 	}
-	return b.String()
+
+	topStr := top.String()
+	bottomStr := bottom.String()
+
+	// Pin the detail+help block to the bottom of the terminal. With a
+	// small result set the table shrinks, and without filler the bottom
+	// block rides up just below it; padding pushes it back down.
+	if m.height > 0 {
+		used := lipgloss.Height(topStr) + lipgloss.Height(bottomStr)
+		if pad := m.height - used - 1; pad > 0 {
+			return topStr + "\n" + strings.Repeat("\n", pad) + bottomStr
+		}
+	}
+	return topStr + "\n\n" + bottomStr
 }
 
 // tableView wraps tbl.View() with a left gutter: a subtle cyan "▌" on
