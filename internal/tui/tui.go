@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -813,11 +814,30 @@ func (m Model) viewDetail() string {
 		detailLabel.Render("url:     ") + truncate(job.URL, m.detailWidth()-12),
 		detailLabel.Render("last:    ") + fmtWhen(job.LastEventAt),
 	}
+	if job.WorkMode != "" {
+		lines = append(lines, detailLabel.Render("mode:    ")+string(job.WorkMode))
+	}
 	if job.Location != "" {
 		lines = append(lines, detailLabel.Render("loc:     ")+job.Location)
 	}
+	if job.Source != "" {
+		lines = append(lines, detailLabel.Render("src:     ")+string(job.Source))
+	}
+	if job.Priority != nil {
+		lines = append(lines, detailLabel.Render("prio:    ")+strconv.Itoa(*job.Priority))
+	}
+	if job.ExpectedComp != nil {
+		ask := strconv.FormatFloat(*job.ExpectedComp, 'f', -1, 64)
+		if job.CompCurrency != "" {
+			ask += " " + job.CompCurrency
+		}
+		lines = append(lines, detailLabel.Render("ask:     ")+ask)
+	}
 	if len(job.TechTags) > 0 {
 		lines = append(lines, detailLabel.Render("tags:    ")+strings.Join(job.TechTags, ", "))
+	}
+	if len(job.CustomTags) > 0 {
+		lines = append(lines, detailLabel.Render("ctags:   ")+strings.Join(job.CustomTags, ", "))
 	}
 	return detailBox.Width(m.detailWidth()).Render(strings.Join(lines, "\n"))
 }
