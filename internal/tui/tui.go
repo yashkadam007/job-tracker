@@ -238,7 +238,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil {
 			m.err = "list: " + msg.err.Error()
-			return m, clearErrAfter(4 * time.Second)
+			return m, clearErrAfter(15 * time.Second)
 		}
 		m.jobs = msg.jobs
 		m.applyFilter()
@@ -249,7 +249,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = "status change: " + msg.err.Error()
 			return m, tea.Batch(
 				listJobsCmd(m.cfg.Reader, m.statusFilter),
-				clearErrAfter(4*time.Second),
+				clearErrAfter(15*time.Second),
 			)
 		}
 		// Reconcile against the real store. The optimistic row update
@@ -259,7 +259,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snoozedMsg:
 		if msg.err != nil {
 			m.err = "snooze: " + msg.err.Error()
-			return m, clearErrAfter(4 * time.Second)
+			return m, clearErrAfter(15 * time.Second)
 		}
 		return m, nil
 
@@ -278,7 +278,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textinput.Blink
 			}
 			m.err = "submit: " + msg.err.Error()
-			return m, clearErrAfter(4 * time.Second)
+			return m, clearErrAfter(15 * time.Second)
 		}
 		// Successful publish — reset modal scratch state so the next /n
 		// starts clean.
@@ -304,7 +304,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = "edit: " + msg.err.Error()
 			return m, tea.Batch(
 				listJobsCmd(m.cfg.Reader, m.statusFilter),
-				clearErrAfter(4*time.Second),
+				clearErrAfter(15*time.Second),
 			)
 		}
 		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
@@ -330,7 +330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err.Error()
-		return m, clearErrAfter(4 * time.Second)
+		return m, clearErrAfter(15 * time.Second)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
