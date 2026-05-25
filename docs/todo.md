@@ -48,3 +48,36 @@ ad-hoc per-feature endpoints.
 Out of scope for ADR 0006's v1 because the minimum useful surface there
 is just the skip counter; the broader health view is a separate
 concern.
+
+## Structured logging via `log/slog`
+
+Source: ADR 0006 (open question on log-rate-limiting), noticed in passing.
+
+Today every service uses the stdlib `log` package. The error path that
+matters most for debugging — `consumeradmin.LogSkip` — already emits a
+structured JSON line (level, event, topic, partition, offset, class,
+error, payload_b64), so the poison-message replay story is intact. The
+gap is everywhere else: per-event success lines in `cmd/store/main.go`
+and `cmd/scheduler/main.go` share the same writer and level as fetch
+errors and retry warnings, so there's no way to suppress chatter
+without also suppressing signal.
+
+Not urgent at single-operator volume (a handful of events per day), but
+worth doing once either of the following bites:
+
+- the success chatter starts drowning real warnings in `docker logs`,
+- the ADR 0006 open question on log-coalesce ("N more of the same in the
+  next Ns") becomes a real need.
+
+When picked up:
+
+- switch `LogSkip` to `slog.Error` with typed attrs — same JSON shape on
+  the wire, less hand-rolled marshaling,
+- introduce a `JOB_TRACKER_LOG_LEVEL` env (default `info`) so the
+  per-event success lines can be demoted to `debug` and silenced in
+  steady state without losing them during incidents,
+- keep `log.Fatalf` for the ADR 0006 `default` crash path — the
+  container-restart signal is the point, structured framing isn't.
+
+Explicitly out of scope: adding a third-party logging library or a log
+aggregator. `log/slog` is stdlib since Go 1.21; nothing else is needed.
