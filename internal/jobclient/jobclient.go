@@ -69,6 +69,17 @@ type Job struct {
 
 	Priority   *int
 	CustomTags []string
+
+	// Notes is the job's append-only note timeline (oldest first), loaded
+	// alongside the row so the detail view can render it without a
+	// second round-trip.
+	Notes []JobNote
+}
+
+// JobNote is one row of job_notes, projected for read views.
+type JobNote struct {
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ListFilter narrows the result set for Reader.List. All fields

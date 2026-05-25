@@ -2,6 +2,7 @@ package jobclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -47,7 +48,12 @@ const jobColumns = `
     j.expected_comp,
     j.resume_version, j.cover_letter_version, j.referral,
     j.recruiter_name, j.recruiter_email, j.recruiter_phone,
-    j.priority, j.custom_tags
+    j.priority, j.custom_tags,
+    COALESCE((
+        SELECT json_agg(json_build_object('body', body, 'created_at', created_at) ORDER BY created_at)
+          FROM job_notes
+         WHERE job_id = j.job_id
+    ), '[]'::json) AS notes
 `
 
 const jobsFromClause = ` FROM jobs j JOIN companies c ON c.company_id = j.company_id`
@@ -197,6 +203,8 @@ func scanJob(s scannable) (Job, error) {
 		recruiterName      *string
 		recruiterEmail     *string
 		recruiterPhone     *string
+
+		notesJSON []byte
 	)
 	if err := s.Scan(
 		&j.JobID, &j.URL, &j.Title, &j.CompanyID, &j.Company, &j.CompanyTags,
@@ -207,8 +215,14 @@ func scanJob(s scannable) (Job, error) {
 		&resumeVersion, &coverLetterVersion, &referral,
 		&recruiterName, &recruiterEmail, &recruiterPhone,
 		&j.Priority, &j.CustomTags,
+		&notesJSON,
 	); err != nil {
 		return Job{}, err
+	}
+	if len(notesJSON) > 0 {
+		if err := json.Unmarshal(notesJSON, &j.Notes); err != nil {
+			return Job{}, fmt.Errorf("scan notes: %w", err)
+		}
 	}
 	j.Status = events.JobStatus(status)
 	j.WorkMode = events.WorkMode(derefStr(workMode))

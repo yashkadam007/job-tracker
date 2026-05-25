@@ -839,6 +839,16 @@ func (m Model) viewDetail() string {
 	if len(job.CustomTags) > 0 {
 		lines = append(lines, detailLabel.Render("ctags:   ")+strings.Join(job.CustomTags, ", "))
 	}
+	if len(job.Notes) > 0 {
+		lines = append(lines, detailLabel.Render("notes:"))
+		// Newest first — the most recently added note is the one the
+		// operator is most likely looking for after pressing 'e'.
+		for i := len(job.Notes) - 1; i >= 0; i-- {
+			n := job.Notes[i]
+			prefix := "  " + helpStyle.Render(fmtWhen(n.CreatedAt)+" ")
+			lines = append(lines, prefix+truncate(n.Body, m.detailWidth()-22))
+		}
+	}
 	return detailBox.Width(m.detailWidth()).Render(strings.Join(lines, "\n"))
 }
 
