@@ -221,8 +221,10 @@ func runTicker(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client, 
 
 // fireDue runs one pass: fetch due reminders, publish a JobReminder
 // for each, then mark fired. Publish-before-mark is deliberate — if
-// we crash in between, the next pass republishes and the Notifier's
-// own ledger turns it into a no-op (event_id is deterministic).
+// we crash in between, the next pass republishes the same event_id
+// ("reminder-<id>"), and the Notifier's claim against processed_events
+// (consumer="notifier", see ADR 0007) turns the duplicate into a
+// no-op.
 func fireDue(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client) error {
 	due, err := sch.FetchDue(ctx, time.Now().UTC(), 100)
 	if err != nil {

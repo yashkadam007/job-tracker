@@ -4,9 +4,11 @@
 // with inline-keyboard buttons (Applied / Rejected / Snooze 1d). The
 // bot service handles the button callbacks; notifier stays one-way.
 //
-// Notifier doesn't touch Postgres; it relies on the Scheduler's
-// deterministic event IDs ("reminder-<id>") and Kafka's offset
-// tracking to avoid double-delivery on restart.
+// Dedup (ADR 0007): each event_id is claimed in processed_events
+// (consumer="notifier") before delivery. The Scheduler's fireDue is
+// publish-then-mark with no atomicity, so a Scheduler crash can
+// republish the same reminder; the claim turns the duplicate into a
+// no-op.
 package main
 
 import (
@@ -20,8 +22,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/db"
 	"job-tracker/internal/events"
 	"job-tracker/internal/telegram"
 )
@@ -31,6 +35,7 @@ const consumerGroup = "notifier"
 var (
 	tg     *telegram.Client
 	chatID string
+	pool   *pgxpool.Pool
 )
 
 func main() {
@@ -42,15 +47,21 @@ func main() {
 		chatID = os.Getenv("TELEGRAM_CHAT_ID")
 	}
 
+	var err error
+	pool, err = db.Connect(ctx, dsn())
+	if err != nil {
+		log.Fatalf("db: %v", err)
+	}
+	defer pool.Close()
+
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers()...),
 		kgo.ConsumerGroup(consumerGroup),
 		kgo.ConsumeTopics(events.TopicJobReminder),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-		// Auto-commit is fine here: the side effect (printing or
-		// sending Telegram) is naturally idempotent enough for v1 — if
-		// we crash after delivery but before commit, the worst case is
-		// one duplicate notification when the consumer restarts.
+		// Auto-commit is fine: dedup lives in processed_events, not in
+		// the Kafka offset. A duplicate redelivery hits the claim's
+		// ON CONFLICT and is skipped.
 	)
 	if err != nil {
 		log.Fatalf("kafka: %v", err)
@@ -76,9 +87,36 @@ func main() {
 				log.Printf("decode error offset=%d: %v", r.Offset, err)
 				return
 			}
+			if ev.EventID == "" {
+				log.Printf("skip: empty event_id offset=%d job_id=%s", r.Offset, ev.JobID)
+				return
+			}
+			claimed, err := claim(ctx, ev.EventID)
+			if err != nil {
+				log.Printf("claim error offset=%d event_id=%s: %v", r.Offset, ev.EventID, err)
+				return
+			}
+			if !claimed {
+				log.Printf("skip duplicate offset=%d event_id=%s", r.Offset, ev.EventID)
+				return
+			}
 			deliver(ctx, ev)
 		})
 	}
+}
+
+// claim records (consumer, event_id) in processed_events. Returns
+// true if this is the first time we've seen the event, false on
+// duplicate. Mirrors internal/bot.claimUpdate — no transaction is
+// needed because the Notifier has no business write to bundle with.
+func claim(ctx context.Context, eventID string) (bool, error) {
+	ct, err := pool.Exec(ctx,
+		`INSERT INTO processed_events (consumer, event_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		consumerGroup, eventID)
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() > 0, nil
 }
 
 func deliver(ctx context.Context, ev events.JobReminder) {
@@ -115,4 +153,12 @@ func brokers() []string {
 		b = "localhost:9092"
 	}
 	return strings.Split(b, ",")
+}
+
+func dsn() string {
+	d := os.Getenv("DATABASE_URL")
+	if d == "" {
+		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
+	}
+	return d
 }
