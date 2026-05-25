@@ -11,6 +11,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,17 +78,17 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
         INSERT INTO jobs (
             job_id, url, title, company_id, status, first_seen_at, last_event_at,
             work_mode, location, seniority, source, tech_tags, description, deadline,
-            comp_min, comp_max, comp_currency, comp_equity, comp_bonus,
+            comp_min, comp_max, comp_currency, comp_equity, comp_bonus, expected_comp,
             resume_version, cover_letter_version, referral,
             recruiter_name, recruiter_email, recruiter_phone,
             priority, custom_tags
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $6,
             $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, $17, $18,
-            $19, $20, $21,
-            $22, $23, $24,
-            $25, $26
+            $14, $15, $16, $17, $18, $19,
+            $20, $21, $22,
+            $23, $24, $25,
+            $26, $27
         )
         ON CONFLICT (job_id) DO UPDATE SET
             url                  = EXCLUDED.url,
@@ -106,6 +108,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
             comp_currency        = EXCLUDED.comp_currency,
             comp_equity          = EXCLUDED.comp_equity,
             comp_bonus           = EXCLUDED.comp_bonus,
+            expected_comp        = EXCLUDED.expected_comp,
             resume_version       = EXCLUDED.resume_version,
             cover_letter_version = EXCLUDED.cover_letter_version,
             referral             = EXCLUDED.referral,
@@ -121,6 +124,7 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 		techTags, nullableStr(ev.Description), ev.Deadline,
 		ev.CompMin, ev.CompMax,
 		nullableStr(ev.CompCurrency), nullableStr(ev.CompEquity), nullableStr(ev.CompBonus),
+		ev.ExpectedComp,
 		nullableStr(ev.ResumeVersion), nullableStr(ev.CoverLetterVersion), nullableStr(ev.Referral),
 		nullableStr(ev.RecruiterName), nullableStr(ev.RecruiterEmail), nullableStr(ev.RecruiterPhone),
 		ev.Priority, customTags,
@@ -216,6 +220,94 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
     `, ev.JobID, ev.Body, ev.CreatedAt, ev.EventID); err != nil {
 		return false, false, wrapDBError(err)
 	}
+	return true, false, wrapDBError(tx.Commit(ctx))
+}
+
+// ApplyEdited applies a sparse JobEdited event (ADR 0011): builds an
+// UPDATE statement with one SET clause per non-nil pointer in ev.
+// Dereferenced zero values map to NULL (or '{}' for text[] columns).
+// missing=true means the job_id wasn't in jobs (edit before submit).
+func (s *Store) ApplyEdited(ctx context.Context, ev events.JobEdited) (applied bool, missing bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, false, wrapDBError(err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := db.ClaimEvent(ctx, tx, Consumer, ev.EventID); err != nil {
+		if errors.Is(err, db.ErrAlreadyProcessed) {
+			return false, false, nil
+		}
+		return false, false, wrapDBError(err)
+	}
+
+	// Build SET clauses dynamically. Pointer-to-zero on the wire becomes
+	// SQL NULL (or '{}' for tag arrays) per the ADR 0011 convention.
+	sets := make([]string, 0, 10)
+	args := make([]any, 0, 12)
+	args = append(args, ev.JobID, ev.EditedAt) // $1, $2
+
+	add := func(col string, val any) {
+		args = append(args, val)
+		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
+	}
+
+	if ev.URL != nil {
+		add("url", *ev.URL)
+	}
+	if ev.Title != nil {
+		add("title", *ev.Title)
+	}
+	if ev.WorkMode != nil {
+		add("work_mode", nullableEnum(string(*ev.WorkMode)))
+	}
+	if ev.Location != nil {
+		add("location", nullableStr(*ev.Location))
+	}
+	if ev.Source != nil {
+		add("source", nullableEnum(string(*ev.Source)))
+	}
+	if ev.TechTags != nil {
+		tags := *ev.TechTags
+		if tags == nil {
+			tags = []string{}
+		}
+		add("tech_tags", tags)
+	}
+	if ev.CustomTags != nil {
+		tags := *ev.CustomTags
+		if tags == nil {
+			tags = []string{}
+		}
+		add("custom_tags", tags)
+	}
+	if ev.Priority != nil {
+		if *ev.Priority == 0 {
+			add("priority", nil)
+		} else {
+			add("priority", *ev.Priority)
+		}
+	}
+	if ev.ExpectedComp != nil {
+		if *ev.ExpectedComp == 0 {
+			add("expected_comp", nil)
+		} else {
+			add("expected_comp", *ev.ExpectedComp)
+		}
+	}
+
+	// last_event_at always bumped on a successful edit apply.
+	sets = append(sets, "last_event_at = $2")
+
+	query := fmt.Sprintf(`UPDATE jobs SET %s WHERE job_id = $1`, strings.Join(sets, ", "))
+	ct, err := tx.Exec(ctx, query, args...)
+	if err != nil {
+		return false, false, wrapDBError(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return true, true, wrapDBError(tx.Commit(ctx))
+	}
+
 	return true, false, wrapDBError(tx.Commit(ctx))
 }
 

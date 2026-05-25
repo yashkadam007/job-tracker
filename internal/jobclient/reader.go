@@ -44,6 +44,7 @@ const jobColumns = `
     j.status, j.first_seen_at, j.last_event_at,
     j.work_mode, j.location, j.seniority, j.source, j.tech_tags, j.description, j.deadline,
     j.comp_min, j.comp_max, j.comp_currency, j.comp_equity, j.comp_bonus,
+    j.expected_comp,
     j.resume_version, j.cover_letter_version, j.referral,
     j.recruiter_name, j.recruiter_email, j.recruiter_phone,
     j.priority, j.custom_tags
@@ -202,6 +203,7 @@ func scanJob(s scannable) (Job, error) {
 		&status, &j.FirstSeenAt, &j.LastEventAt,
 		&workMode, &location, &seniority, &source, &j.TechTags, &description, &j.Deadline,
 		&j.CompMin, &j.CompMax, &compCurrency, &compEquity, &compBonus,
+		&j.ExpectedComp,
 		&resumeVersion, &coverLetterVersion, &referral,
 		&recruiterName, &recruiterEmail, &recruiterPhone,
 		&j.Priority, &j.CustomTags,

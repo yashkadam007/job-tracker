@@ -56,6 +56,7 @@ func main() {
 			events.TopicJobStatusChanged,
 			events.TopicJobNoteAdded,
 			events.TopicJobInterviewRecorded,
+			events.TopicJobEdited,
 		),
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
@@ -73,9 +74,10 @@ func main() {
 		}
 	}()
 
-	log.Printf("store: consuming %s, %s, %s, %s (group=%s) admin=%s",
+	log.Printf("store: consuming %s, %s, %s, %s, %s (group=%s) admin=%s",
 		events.TopicJobSubmitted, events.TopicJobStatusChanged,
 		events.TopicJobNoteAdded, events.TopicJobInterviewRecorded,
+		events.TopicJobEdited,
 		store.Consumer, adminAddr)
 
 	for {
@@ -213,6 +215,23 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 			log.Printf("note: no job for job_id=%s (note before submit?)", ev.JobID)
 		default:
 			log.Printf("note: added for %s", ev.JobID)
+		}
+	case events.TopicJobEdited:
+		var ev events.JobEdited
+		if err := json.Unmarshal(r.Value, &ev); err != nil {
+			return fmt.Errorf("%w: %w", store.ErrDecode, err)
+		}
+		applied, missing, err := st.ApplyEdited(ctx, ev)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !applied:
+			log.Printf("edit: dup event_id=%s skipped", ev.EventID)
+		case missing:
+			log.Printf("edit: no job for job_id=%s (edit before submit?)", ev.JobID)
+		default:
+			log.Printf("edit: applied for %s", ev.JobID)
 		}
 	case events.TopicJobInterviewRecorded:
 		var ev events.JobInterviewRecorded

@@ -21,6 +21,7 @@ const (
 	TopicJobReminder           = "job.reminder"
 	TopicJobNoteAdded          = "job.note.added"
 	TopicJobInterviewRecorded  = "job.interview.recorded"
+	TopicJobEdited             = "job.edited"
 )
 
 type JobStatus string
@@ -114,6 +115,10 @@ type JobSubmitted struct {
 	CompCurrency string   `json:"comp_currency,omitempty"`
 	CompEquity   string   `json:"comp_equity,omitempty"`
 	CompBonus    string   `json:"comp_bonus,omitempty"`
+	// ExpectedComp is the operator's quoted number (ADR 0011) — distinct
+	// from CompMin/CompMax (the posting's advertised range). Shares
+	// CompCurrency.
+	ExpectedComp *float64 `json:"expected_comp,omitempty"`
 
 	// Application details.
 	ResumeVersion      string `json:"resume_version,omitempty"`
@@ -126,6 +131,33 @@ type JobSubmitted struct {
 	// Personal scaffolding.
 	Priority   *int     `json:"priority,omitempty"`
 	CustomTags []string `json:"custom_tags,omitempty"`
+}
+
+// JobEdited is published when the operator edits one or more mutable
+// fields on an existing job (ADR 0011). Sparse-by-default: every
+// editable field is a pointer. nil = no change for this field; non-nil
+// = set the column to the dereferenced value. Dereferenced zero values
+// mean "clear to NULL" (or '{}' for text[] columns) — the Store
+// consumer translates accordingly.
+//
+// URL and Title are settable-only. Both columns are NOT NULL (and URL
+// is UNIQUE), so a pointer to an empty string is rejected by the
+// Publisher with ErrMissingURL / ErrMissingTitle — the "zero means
+// clear" rule applies to the other seven fields only.
+type JobEdited struct {
+	EventID  string    `json:"event_id"`
+	JobID    string    `json:"job_id"`
+	EditedAt time.Time `json:"edited_at"`
+
+	URL          *string   `json:"url,omitempty"`
+	Title        *string   `json:"title,omitempty"`
+	WorkMode     *WorkMode `json:"work_mode,omitempty"`
+	Location     *string   `json:"location,omitempty"`
+	Source       *Source   `json:"source,omitempty"`
+	TechTags     *[]string `json:"tech_tags,omitempty"`
+	CustomTags   *[]string `json:"custom_tags,omitempty"`
+	Priority     *int      `json:"priority,omitempty"`
+	ExpectedComp *float64  `json:"expected_comp,omitempty"`
 }
 
 // JobStatusChanged is published when an existing job's status changes

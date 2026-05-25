@@ -27,6 +27,9 @@ var (
 	ErrInvalidCompensation   = errors.New("invalid compensation")
 	ErrInvalidDeadline       = errors.New("invalid deadline")
 	ErrInvalidTag            = errors.New("invalid tag")
+	ErrInvalidPriority       = errors.New("invalid priority")
+	ErrInvalidExpectedComp   = errors.New("invalid expected compensation")
+	ErrEmptyEdit             = errors.New("empty edit")
 )
 
 // validationSentinels lists every error a validator may return.
@@ -48,6 +51,9 @@ var validationSentinels = []error{
 	ErrInvalidCompensation,
 	ErrInvalidDeadline,
 	ErrInvalidTag,
+	ErrInvalidPriority,
+	ErrInvalidExpectedComp,
+	ErrEmptyEdit,
 }
 
 // IsValidationError reports whether err wraps any producer-side

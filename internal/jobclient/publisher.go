@@ -77,6 +77,16 @@ func (p *Publisher) AddNote(ctx context.Context, ev events.JobNoteAdded) error {
 	return p.produce(ctx, events.TopicJobNoteAdded, ev.JobID, ev)
 }
 
+// Edit publishes a JobEdited event (ADR 0011). The event is validated
+// first; on validation failure no Kafka produce is attempted. Sparse:
+// only fields the operator actually changed are non-nil on the event.
+func (p *Publisher) Edit(ctx context.Context, ev events.JobEdited) error {
+	if err := validateEdited(ev); err != nil {
+		return err
+	}
+	return p.produce(ctx, events.TopicJobEdited, ev.JobID, ev)
+}
+
 // RecordInterview publishes a JobInterviewRecorded event. The same
 // topic carries both "schedule" and "complete/update" shapes — the
 // Store upserts on interview_id with a COALESCE pattern.

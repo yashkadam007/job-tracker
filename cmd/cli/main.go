@@ -74,6 +74,8 @@ func main() {
 		cmdNote(pub, os.Args[2:])
 	case "interview":
 		cmdInterview(pub, os.Args[2:])
+	case "edit":
+		cmdEdit(pub, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -89,6 +91,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  jobs note add --job-id <id> --body <text>")
 	fmt.Fprintln(os.Stderr, "  jobs interview schedule --job-id <id> --round <r> --scheduled-at <ts> [--interviewer <n> …] [--notes <text>]")
 	fmt.Fprintln(os.Stderr, "  jobs interview update --interview-id <id> --job-id <id> [--completed-at <ts>] [--outcome <o>] [--interviewer <n> …] [--notes <text>]")
+	fmt.Fprintln(os.Stderr, "  jobs edit --job-id <id> [--work-mode <m>] [--location <l>] [--source <s>] [--tech-tags <csv>] [--custom-tags <csv>] [--priority <1-5>] [--expected-comp <n>]")
+	fmt.Fprintln(os.Stderr, "      pass --clear as the value of any flag above to clear that field to NULL / {}.")
 }
 
 // cmdEnsureTopics creates the topics if they don't already exist. Run
@@ -109,6 +113,7 @@ func cmdEnsureTopics() {
 		events.TopicJobReminder,
 		events.TopicJobNoteAdded,
 		events.TopicJobInterviewRecorded,
+		events.TopicJobEdited,
 	}
 
 	// 1 partition, 1 replica — fine for a single-broker dev cluster.
@@ -400,6 +405,132 @@ func cmdInterviewUpdate(pub *jobclient.Publisher, args []string) {
 		failPublish(err)
 	}
 	fmt.Printf("interview updated: %s\n", ev.InterviewID)
+}
+
+// clearSentinel is the literal value an edit flag takes to request
+// "clear this column to NULL (or '{}' for tag arrays)". Plain absence
+// of a flag still means "no change". ADR 0011.
+const clearSentinel = "--clear"
+
+// cmdEdit publishes a sparse JobEdited event (ADR 0011). Each flag is
+// independently optional; unset flags publish nil pointers. Passing
+// the literal `--clear` as a flag's value publishes a zero-value
+// pointer (clear-to-NULL).
+func cmdEdit(pub *jobclient.Publisher, args []string) {
+	fs := flag.NewFlagSet("edit", flag.ExitOnError)
+	jobID := fs.String("job-id", "", "job id (required)")
+	workMode := fs.String("work-mode", "", "onsite|hybrid|remote (or --clear)")
+	location := fs.String("location", "", "city/region (or --clear)")
+	source := fs.String("source", "", "linkedin|indeed|referral|company_site|recruiter|other (or --clear)")
+	techTags := fs.String("tech-tags", "", "comma-separated tech tags (or --clear)")
+	customTags := fs.String("custom-tags", "", "comma-separated custom tags (or --clear)")
+	priority := fs.String("priority", "", "1-5 (or --clear)")
+	expectedComp := fs.String("expected-comp", "", "operator's quoted compensation (or --clear)")
+	_ = fs.Parse(args)
+
+	if *jobID == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	ev := events.JobEdited{
+		EventID:  uuid.NewString(),
+		JobID:    *jobID,
+		EditedAt: time.Now().UTC(),
+	}
+
+	if flagWasSet(fs, "work-mode") {
+		var v events.WorkMode
+		if *workMode != clearSentinel {
+			v = events.WorkMode(*workMode)
+		}
+		ev.WorkMode = &v
+	}
+	if flagWasSet(fs, "location") {
+		v := ""
+		if *location != clearSentinel {
+			v = *location
+		}
+		ev.Location = &v
+	}
+	if flagWasSet(fs, "source") {
+		var v events.Source
+		if *source != clearSentinel {
+			v = events.Source(*source)
+		}
+		ev.Source = &v
+	}
+	if flagWasSet(fs, "tech-tags") {
+		ts := parseTagsCSV(*techTags)
+		ev.TechTags = &ts
+	}
+	if flagWasSet(fs, "custom-tags") {
+		ts := parseTagsCSV(*customTags)
+		ev.CustomTags = &ts
+	}
+	if flagWasSet(fs, "priority") {
+		v := 0
+		if *priority != clearSentinel {
+			n, err := parseInt(*priority)
+			if err != nil {
+				log.Fatalf("--priority: %v", err)
+			}
+			v = n
+		}
+		ev.Priority = &v
+	}
+	if flagWasSet(fs, "expected-comp") {
+		v := 0.0
+		if *expectedComp != clearSentinel {
+			f, err := parseFloat(*expectedComp)
+			if err != nil {
+				log.Fatalf("--expected-comp: %v", err)
+			}
+			v = f
+		}
+		ev.ExpectedComp = &v
+	}
+
+	ctx, cancel := publishCtx()
+	defer cancel()
+	if err := pub.Edit(ctx, ev); err != nil {
+		failPublish(err)
+	}
+	fmt.Printf("edit published: %s\n", ev.JobID)
+}
+
+// parseTagsCSV splits a comma-separated tag list. clearSentinel and
+// the empty string both yield an empty slice, which the consumer
+// translates to '{}' on the column.
+func parseTagsCSV(v string) []string {
+	if v == "" || v == clearSentinel {
+		return []string{}
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func parseInt(s string) (int, error) {
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, fmt.Errorf("expected integer, got %q", s)
+	}
+	return n, nil
+}
+
+func parseFloat(s string) (float64, error) {
+	var f float64
+	if _, err := fmt.Sscanf(s, "%g", &f); err != nil {
+		return 0, fmt.Errorf("expected number, got %q", s)
+	}
+	return f, nil
 }
 
 // publishCtx is the per-call timeout for a single ProduceSync — the

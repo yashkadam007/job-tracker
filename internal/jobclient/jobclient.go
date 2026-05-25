@@ -58,6 +58,7 @@ type Job struct {
 	CompCurrency string
 	CompEquity   string
 	CompBonus    string
+	ExpectedComp *float64
 
 	ResumeVersion      string
 	CoverLetterVersion string

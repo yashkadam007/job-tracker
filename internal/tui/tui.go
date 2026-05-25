@@ -60,6 +60,7 @@ const (
 	modeNew
 	modeSearch
 	modeStatus
+	modeEdit
 )
 
 // newStep tracks which field of the new-job form the user is filling.
@@ -116,6 +117,29 @@ type Model struct {
 	statusLoading bool
 	statusResults []skipCountResult
 	statusFetched time.Time
+
+	// edit modal (ADR 0011). editJob is the snapshot taken when the
+	// modal opens — the modal never re-fetches. editCursor indexes
+	// editFields; editing=true means an inline editor (textinput or
+	// enum cycler) owns input. The edit* pointers stage individual
+	// field changes; nil = "no change for this field", non-nil = "set
+	// to dereferenced value" (dereferenced zero = clear-to-NULL).
+	editJob          jobclient.Job
+	editCursor       int
+	editing          bool
+	editInput        textinput.Model
+	editEnumIdx      int
+	editErr          string
+	editURL          *string
+	editTitle        *string
+	editWorkMode     *events.WorkMode
+	editLocation     *string
+	editSource       *events.Source
+	editTechTags     *[]string
+	editCustomTags   *[]string
+	editPriority     *int
+	editExpectedComp *float64
+	editNote         string
 
 	loading bool
 	err     string
@@ -265,6 +289,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// briefly absent. Acceptable.
 		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
 
+	case editedMsg:
+		if msg.err != nil {
+			if jobclient.IsValidationError(msg.err) {
+				// Producer-side rejection: reopen the modal so the
+				// operator can correct. Staged edits are kept (the
+				// edit* pointers live on Model until enterEditMode
+				// resets them).
+				m.mode = modeEdit
+				m.editErr = msg.err.Error()
+				m.editing = false
+				return m, nil
+			}
+			m.err = "edit: " + msg.err.Error()
+			return m, tea.Batch(
+				listJobsCmd(m.cfg.Reader, m.statusFilter),
+				clearErrAfter(4*time.Second),
+			)
+		}
+		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
+
 	case clearErrMsg:
 		m.err = ""
 		return m, nil
@@ -302,6 +346,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg)
 	case modeStatus:
 		return m.handleStatusKey(msg)
+	case modeEdit:
+		return m.handleEditKey(msg)
 	}
 
 	// modeList
@@ -369,6 +415,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusLoading = true
 		m.statusResults = nil
 		return m, fetchSkipCountsCmd(m.cfg.AdminEndpoints)
+	case "e":
+		job, ok := m.selectedJob()
+		if !ok {
+			return m, nil
+		}
+		m.enterEditMode(job)
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -664,6 +717,9 @@ func (m Model) View() string {
 	if m.mode == modeStatus {
 		return m.viewStatus()
 	}
+	if m.mode == modeEdit {
+		return m.viewEdit()
+	}
 
 	w := m.width
 	if w < 40 {
@@ -777,7 +833,7 @@ func (m Model) detailWidth() int {
 func (m Model) viewHelp() string {
 	keys := []string{
 		"a=applied", "i=interview", "o=offer", "r=rejected", "w=withdrawn",
-		"S=saved", "s=snooze1d", "n=new", "/=search", "f=filter", "R=reload",
+		"S=saved", "s=snooze1d", "n=new", "e=edit", "/=search", "f=filter", "R=reload",
 		"H=health", "q=quit",
 	}
 	return helpStyle.Render(strings.Join(keys, "  "))

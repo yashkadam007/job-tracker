@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,15 @@ type snoozedMsg struct {
 type submittedMsg struct {
 	job events.JobSubmitted
 	err error
+}
+
+// editedMsg is delivered after editJobAndNoteCmd finishes. err is the
+// first non-nil error from the Edit publish and (optionally) the note
+// publish — the modal renders it verbatim and reopens for correction
+// if it's a validation error.
+type editedMsg struct {
+	jobID string
+	err   error
 }
 
 type companiesLoadedMsg struct {
@@ -113,6 +123,44 @@ func submitCmd(pub *jobclient.Publisher, url, title, company string) tea.Cmd {
 		defer cancel()
 		err := pub.Submit(ctx, ev)
 		return submittedMsg{job: ev, err: err}
+	}
+}
+
+// editJobAndNoteCmd publishes one JobEdited (the sparse field-edit
+// event from ADR 0011) plus, if note is non-empty, one JobNoteAdded.
+// Both events share the same timestamp so the timeline groups them.
+// Validation runs producer-side inside Publisher.Edit / Publisher.AddNote;
+// returns the first non-nil error so the modal can surface it.
+func editJobAndNoteCmd(pub *jobclient.Publisher, ev events.JobEdited, note string) tea.Cmd {
+	ev.EventID = uuid.NewString()
+	ev.EditedAt = time.Now().UTC()
+	hasEdit := ev.URL != nil || ev.Title != nil || ev.WorkMode != nil ||
+		ev.Location != nil || ev.Source != nil || ev.TechTags != nil ||
+		ev.CustomTags != nil || ev.Priority != nil || ev.ExpectedComp != nil
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		// Empty-edit guard at the Publisher (ErrEmptyEdit) means we
+		// only publish the field-edit event when something actually
+		// changed. A note-only save (the operator added a note but
+		// touched no fields) still publishes the JobNoteAdded below.
+		if hasEdit {
+			if err := pub.Edit(ctx, ev); err != nil {
+				return editedMsg{jobID: ev.JobID, err: err}
+			}
+		}
+		if strings.TrimSpace(note) != "" {
+			nev := events.JobNoteAdded{
+				EventID:   uuid.NewString(),
+				JobID:     ev.JobID,
+				Body:      note,
+				CreatedAt: ev.EditedAt,
+			}
+			if err := pub.AddNote(ctx, nev); err != nil {
+				return editedMsg{jobID: ev.JobID, err: err}
+			}
+		}
+		return editedMsg{jobID: ev.JobID}
 	}
 }
 

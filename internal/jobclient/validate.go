@@ -76,6 +76,91 @@ func validateStatusChanged(ev events.JobStatusChanged) error {
 	return nil
 }
 
+// validateEdited validates a sparse JobEdited (ADR 0011). Requires
+// EventID, JobID, EditedAt and at least one non-nil editable field.
+// For each non-nil field, runs the same value check validateSubmitted
+// already does — plus a strict-positive check on ExpectedComp and a
+// 1-5 range check on Priority. URL/Title are settable-only: a pointer
+// to an empty string is rejected with the existing ErrMissingURL /
+// ErrMissingTitle sentinels.
+func validateEdited(ev events.JobEdited) error {
+	if ev.JobID == "" {
+		return fmt.Errorf("%w: job_id is required", ErrMissingJobID)
+	}
+	if ev.EventID == "" {
+		return fmt.Errorf("%w: event_id is required", ErrMissingJobID)
+	}
+	if ev.EditedAt.IsZero() {
+		return fmt.Errorf("%w: edited_at is required", ErrMissingJobID)
+	}
+
+	if !hasAnyEditField(ev) {
+		return fmt.Errorf("%w: at least one field must be set", ErrEmptyEdit)
+	}
+
+	if ev.URL != nil {
+		if strings.TrimSpace(*ev.URL) == "" {
+			return fmt.Errorf("%w: url cannot be cleared", ErrMissingURL)
+		}
+		if err := validateURL(*ev.URL); err != nil {
+			return err
+		}
+	}
+	if ev.Title != nil {
+		if strings.TrimSpace(*ev.Title) == "" {
+			return fmt.Errorf("%w: title cannot be cleared", ErrMissingTitle)
+		}
+	}
+	if ev.WorkMode != nil && *ev.WorkMode != "" {
+		if !slices.Contains(events.AllowedWorkModes, *ev.WorkMode) {
+			return fmt.Errorf("%w: %q; allowed: %s",
+				ErrInvalidWorkMode, *ev.WorkMode, joinWorkModes(events.AllowedWorkModes))
+		}
+	}
+	if ev.Source != nil && *ev.Source != "" {
+		if !slices.Contains(events.AllowedSources, *ev.Source) {
+			return fmt.Errorf("%w: %q; allowed: %s",
+				ErrInvalidSource, *ev.Source, joinSources(events.AllowedSources))
+		}
+	}
+	if ev.Priority != nil && *ev.Priority != 0 {
+		if *ev.Priority < 1 || *ev.Priority > 5 {
+			return fmt.Errorf("%w: %d; allowed 1-5", ErrInvalidPriority, *ev.Priority)
+		}
+	}
+	if ev.ExpectedComp != nil && *ev.ExpectedComp != 0 {
+		if *ev.ExpectedComp <= 0 {
+			return fmt.Errorf("%w: %v; must be > 0", ErrInvalidExpectedComp, *ev.ExpectedComp)
+		}
+	}
+	if ev.TechTags != nil {
+		if err := validateTags("tech_tag", *ev.TechTags); err != nil {
+			return err
+		}
+	}
+	if ev.CustomTags != nil {
+		if err := validateTags("custom_tag", *ev.CustomTags); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hasAnyEditField reports whether ev sets at least one editable field.
+// Mirrors the field list of JobEdited; keep in sync when fields are
+// added to the event.
+func hasAnyEditField(ev events.JobEdited) bool {
+	return ev.URL != nil ||
+		ev.Title != nil ||
+		ev.WorkMode != nil ||
+		ev.Location != nil ||
+		ev.Source != nil ||
+		ev.TechTags != nil ||
+		ev.CustomTags != nil ||
+		ev.Priority != nil ||
+		ev.ExpectedComp != nil
+}
+
 func validateNoteAdded(ev events.JobNoteAdded) error {
 	if ev.JobID == "" {
 		return fmt.Errorf("%w: job_id is required", ErrMissingJobID)
