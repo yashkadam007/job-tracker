@@ -29,6 +29,15 @@ Rootless podman is fine; nothing here needs root.
 > Newer podman ships `podman compose` (space, no hyphen) as a drop-in.
 > Both work — substitute whichever you have.
 
+> **Make shortcuts.** The root `Makefile` wraps the most common
+> compose verbs — `make up`, `make down`, `make logs`, `make ps`,
+> `make restart` — and defaults `COMPOSE=podman-compose`, so they
+> work as-is on this host. `make help` lists everything. The runbook
+> spells out `podman-compose …` for clarity (and because most calls
+> target specific services or pass flags like `--no-deps` /
+> `--force-recreate` that the wrappers don't expose), but the bare
+> all-services forms are interchangeable with `make`.
+
 ---
 
 ## 1. Clone & build images
@@ -385,7 +394,7 @@ groups are independent.
 
 ```bash
 podman-compose stop                 # stop containers, keep volumes
-podman-compose down                 # remove containers, keep volumes
+make down                           # remove containers, keep volumes
 podman-compose down -v              # ALSO delete Kafka logs + Postgres data
 ```
 
@@ -839,7 +848,7 @@ cd ~/job-tracker
 git pull
 podman-compose build           # only if code changed
 make migrate-up                # only if internal/db/migrations/ changed
-podman-compose up -d           # brings up everything (infra + services)
+make up                        # brings up everything (infra + services)
 # then use the CLI as needed:
 podman-compose run --rm --no-deps cli add --url ... --title ... --company ...
 # or just talk to the bot in Telegram.

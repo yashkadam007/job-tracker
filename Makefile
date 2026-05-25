@@ -18,7 +18,7 @@ DATABASE_URL    ?= postgres://jobtracker:jobtracker@localhost:5432/jobtracker?ss
 KAFKA_BOOTSTRAP ?= localhost:9092
 
 MIGRATIONS_DIR  := internal/db/migrations
-COMPOSE         ?= docker compose
+COMPOSE         ?= podman-compose
 
 # Prefer a locally-installed `migrate` binary; fall back to the
 # golang-migrate Docker image so a contributor without the CLI on PATH
