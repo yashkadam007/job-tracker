@@ -16,11 +16,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"job-tracker/internal/config"
 	"job-tracker/internal/db"
 	"job-tracker/internal/jobclient"
 	"job-tracker/internal/tui"
@@ -30,13 +30,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, config.DSN("JOB_TRACKER_"))
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 	defer pool.Close()
 
-	pub, err := jobclient.NewPublisher(brokers())
+	pub, err := jobclient.NewPublisher(config.Brokers("JOB_TRACKER_"))
 	if err != nil {
 		log.Fatalf("publisher: %v", err)
 	}
@@ -59,25 +59,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "jobtracker: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// brokers reads JOB_TRACKER_KAFKA_BOOTSTRAP (comma-separated). Namespaced
-// rather than KAFKA_BOOTSTRAP because the TUI's config lives in the
-// user's ~/.zshrc — a global namespace shared with other tools.
-func brokers() []string {
-	b := os.Getenv("JOB_TRACKER_KAFKA_BOOTSTRAP")
-	if b == "" {
-		b = "localhost:9092"
-	}
-	return strings.Split(b, ",")
-}
-
-func dsn() string {
-	d := os.Getenv("JOB_TRACKER_DATABASE_URL")
-	if d == "" {
-		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
-	}
-	return d
 }
 
 // adminEndpoints surfaces the consumer-side /skip-count endpoints

@@ -32,6 +32,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/config"
 	"job-tracker/internal/events"
 	"job-tracker/internal/jobclient"
 )
@@ -54,7 +55,7 @@ func main() {
 
 	// One Publisher per process, reused across every subcommand. Replaces
 	// the old per-call kgo.NewClient pattern.
-	pub, err := jobclient.NewPublisher(brokers())
+	pub, err := jobclient.NewPublisher(config.Brokers(""))
 	if err != nil {
 		log.Fatalf("publisher: %v", err)
 	}
@@ -90,22 +91,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  jobs interview update --interview-id <id> --job-id <id> [--completed-at <ts>] [--outcome <o>] [--interviewer <n> …] [--notes <text>]")
 }
 
-// brokers reads KAFKA_BOOTSTRAP (comma-separated) or defaults to the
-// host-side listener exposed by compose.yml.
-func brokers() []string {
-	b := os.Getenv("KAFKA_BOOTSTRAP")
-	if b == "" {
-		b = "localhost:9092"
-	}
-	return strings.Split(b, ",")
-}
-
 // cmdEnsureTopics creates the topics if they don't already exist. Run
 // this once after starting the cluster. Kafka *can* auto-create topics
 // on first publish, but explicit creation lets us set partition and
 // replication factor up front.
 func cmdEnsureTopics() {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers()...))
+	cl, err := kgo.NewClient(kgo.SeedBrokers(config.Brokers("")...))
 	if err != nil {
 		log.Fatalf("kafka client: %v", err)
 	}

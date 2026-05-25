@@ -18,13 +18,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/config"
 	"job-tracker/internal/db"
 	"job-tracker/internal/events"
 	"job-tracker/internal/telegram"
@@ -48,14 +48,14 @@ func main() {
 	}
 
 	var err error
-	pool, err = db.Connect(ctx, dsn())
+	pool, err = db.Connect(ctx, config.DSN(""))
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 	defer pool.Close()
 
 	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers()...),
+		kgo.SeedBrokers(config.Brokers("")...),
 		kgo.ConsumerGroup(consumerGroup),
 		kgo.ConsumeTopics(events.TopicJobReminder),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
@@ -147,18 +147,3 @@ func deliver(ctx context.Context, ev events.JobReminder) {
 	}
 }
 
-func brokers() []string {
-	b := os.Getenv("KAFKA_BOOTSTRAP")
-	if b == "" {
-		b = "localhost:9092"
-	}
-	return strings.Split(b, ",")
-}
-
-func dsn() string {
-	d := os.Getenv("DATABASE_URL")
-	if d == "" {
-		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
-	}
-	return d
-}

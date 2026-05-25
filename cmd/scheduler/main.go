@@ -29,12 +29,12 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/config"
 	"job-tracker/internal/consumeradmin"
 	"job-tracker/internal/db"
 	"job-tracker/internal/events"
@@ -47,7 +47,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, config.DSN(""))
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
@@ -67,7 +67,7 @@ func main() {
 	})
 
 	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers()...),
+		kgo.SeedBrokers(config.Brokers("")...),
 		kgo.ConsumerGroup(scheduler.Consumer),
 		kgo.ConsumeTopics(events.TopicJobSubmitted, events.TopicJobStatusChanged),
 		kgo.DisableAutoCommit(),
@@ -82,7 +82,7 @@ func main() {
 	// Mixing consumer + producer on one client is fine but keeping
 	// them separate makes lifecycles easier to reason about.
 	prod, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers()...),
+		kgo.SeedBrokers(config.Brokers("")...),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProducerLinger(10*time.Millisecond),
 	)
@@ -264,22 +264,6 @@ func fireDue(ctx context.Context, sch *scheduler.Scheduler, prod *kgo.Client) er
 		log.Printf("fired reminder id=%d job_id=%s url=%s kind=%s", d.ID, d.JobID, d.URL, d.Kind)
 	}
 	return nil
-}
-
-func brokers() []string {
-	b := os.Getenv("KAFKA_BOOTSTRAP")
-	if b == "" {
-		b = "localhost:9092"
-	}
-	return strings.Split(b, ",")
-}
-
-func dsn() string {
-	d := os.Getenv("DATABASE_URL")
-	if d == "" {
-		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
-	}
-	return d
 }
 
 // envDuration reads <key>_SECONDS as integer seconds, falling back to

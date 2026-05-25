@@ -23,12 +23,12 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"job-tracker/internal/config"
 	"job-tracker/internal/consumeradmin"
 	"job-tracker/internal/db"
 	"job-tracker/internal/events"
@@ -41,7 +41,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, config.DSN(""))
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
@@ -49,7 +49,7 @@ func main() {
 	st := store.New(pool)
 
 	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers()...),
+		kgo.SeedBrokers(config.Brokers("")...),
 		kgo.ConsumerGroup(store.Consumer),
 		kgo.ConsumeTopics(
 			events.TopicJobSubmitted,
@@ -235,21 +235,5 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 		return fmt.Errorf("%w: %s", store.ErrUnknownTopic, r.Topic)
 	}
 	return nil
-}
-
-func brokers() []string {
-	b := os.Getenv("KAFKA_BOOTSTRAP")
-	if b == "" {
-		b = "localhost:9092"
-	}
-	return strings.Split(b, ",")
-}
-
-func dsn() string {
-	d := os.Getenv("DATABASE_URL")
-	if d == "" {
-		d = "postgres://jobtracker:jobtracker@localhost:5432/jobtracker?sslmode=disable"
-	}
-	return d
 }
 
