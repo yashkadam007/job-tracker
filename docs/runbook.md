@@ -98,7 +98,7 @@ with `DATABASE_URL=… make migrate-up` to target a different DB.
 
 If you don't have `golang-migrate` on your PATH, the Makefile transparently
 falls back to running it via the `docker.io/migrate/migrate:latest`
-image. To install the binary instead:
+image under `podman`. To install the binary instead:
 
 ```bash
 brew install golang-migrate              # macOS

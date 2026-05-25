@@ -21,21 +21,20 @@ MIGRATIONS_DIR  := internal/db/migrations
 COMPOSE         ?= podman-compose
 
 # Prefer a locally-installed `migrate` binary; fall back to the
-# golang-migrate Docker image so a contributor without the CLI on PATH
-# still gets a working `make migrate-*`. --network=host lets the
-# container reach a host-bound Postgres on Linux; on macOS, install
-# the binary (`brew install golang-migrate`) or point DATABASE_URL at
-# `host.docker.internal`.
+# golang-migrate container image via podman so a contributor without
+# the CLI on PATH still gets a working `make migrate-*`. --network=host
+# lets the container reach a host-bound Postgres on Linux; on macOS,
+# install the binary (`brew install golang-migrate`).
 MIGRATE_LOCAL := $(shell command -v migrate 2>/dev/null)
 ifdef MIGRATE_LOCAL
   MIGRATE_DB  := $(MIGRATE_LOCAL) -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)"
   MIGRATE_FS  := $(MIGRATE_LOCAL)
 else
-  MIGRATE_DB  := docker run --rm --network=host \
+  MIGRATE_DB  := podman run --rm --network=host \
                    -v $(CURDIR)/$(MIGRATIONS_DIR):/migrations \
                    docker.io/migrate/migrate:latest \
                    -path /migrations -database "$(DATABASE_URL)"
-  MIGRATE_FS  := docker run --rm \
+  MIGRATE_FS  := podman run --rm \
                    -v $(CURDIR)/$(MIGRATIONS_DIR):/migrations \
                    docker.io/migrate/migrate:latest
 endif
