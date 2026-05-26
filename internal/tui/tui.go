@@ -808,48 +808,89 @@ func (m Model) viewDetail() string {
 	if !ok {
 		return detailBox.Width(m.detailWidth()).Render(helpStyle.Render("no job selected"))
 	}
-	lines := []string{
-		fmt.Sprintf("%s  %s", styleStatus(string(job.Status)), titleStyle.Render(job.Title)),
+
+	// Three columns: always-present fields (company/url/last) on the
+	// left, optional fields in the middle, notes on the right. Falls
+	// back to vertical layout when the terminal is too narrow.
+	const (
+		col1W = 42
+		col2W = 32
+		gapW  = 2
+	)
+	header := fmt.Sprintf("%s  %s", styleStatus(string(job.Status)), titleStyle.Render(job.Title))
+
+	col1 := []string{
 		detailLabel.Render("company: ") + job.Company,
-		detailLabel.Render("url:     ") + truncate(job.URL, m.detailWidth()-12),
+		detailLabel.Render("url:     ") + truncate(job.URL, col1W-9),
 		detailLabel.Render("last:    ") + fmtWhen(job.LastEventAt),
 	}
+
+	var col2 []string
 	if job.WorkMode != "" {
-		lines = append(lines, detailLabel.Render("mode:    ")+string(job.WorkMode))
+		col2 = append(col2, detailLabel.Render("mode:    ")+string(job.WorkMode))
 	}
 	if job.Location != "" {
-		lines = append(lines, detailLabel.Render("loc:     ")+job.Location)
+		col2 = append(col2, detailLabel.Render("loc:     ")+job.Location)
 	}
 	if job.Source != "" {
-		lines = append(lines, detailLabel.Render("src:     ")+string(job.Source))
+		col2 = append(col2, detailLabel.Render("src:     ")+string(job.Source))
 	}
 	if job.Priority != nil {
-		lines = append(lines, detailLabel.Render("prio:    ")+strconv.Itoa(*job.Priority))
+		col2 = append(col2, detailLabel.Render("prio:    ")+strconv.Itoa(*job.Priority))
 	}
 	if job.ExpectedComp != nil {
 		ask := strconv.FormatFloat(*job.ExpectedComp, 'f', -1, 64)
 		if job.CompCurrency != "" {
 			ask += " " + job.CompCurrency
 		}
-		lines = append(lines, detailLabel.Render("ask:     ")+ask)
+		col2 = append(col2, detailLabel.Render("ask:     ")+ask)
 	}
 	if len(job.TechTags) > 0 {
-		lines = append(lines, detailLabel.Render("tags:    ")+strings.Join(job.TechTags, ", "))
+		col2 = append(col2, detailLabel.Render("tags:    ")+strings.Join(job.TechTags, ", "))
 	}
 	if len(job.CustomTags) > 0 {
-		lines = append(lines, detailLabel.Render("ctags:   ")+strings.Join(job.CustomTags, ", "))
+		col2 = append(col2, detailLabel.Render("ctags:   ")+strings.Join(job.CustomTags, ", "))
 	}
-	if len(job.Notes) > 0 {
-		lines = append(lines, detailLabel.Render("notes:"))
-		// Newest first — the most recently added note is the one the
-		// operator is most likely looking for after pressing 'e'.
-		for i := len(job.Notes) - 1; i >= 0; i-- {
-			n := job.Notes[i]
-			prefix := "  " + helpStyle.Render(fmtWhen(n.CreatedAt)+" ")
-			lines = append(lines, prefix+truncate(n.Body, m.detailWidth()-22))
+
+	box := detailBox.Width(m.detailWidth())
+	col3W := m.detailWidth() - col1W - col2W - 2*gapW
+	if m.detailWidth() < col1W+col2W+2*gapW+30 {
+		// Narrow-terminal fallback: stack everything vertically.
+		lines := append([]string{header}, col1...)
+		lines = append(lines, col2...)
+		if len(job.Notes) > 0 {
+			lines = append(lines, detailLabel.Render("notes:"))
+			for i := len(job.Notes) - 1; i >= 0; i-- {
+				n := job.Notes[i]
+				prefix := "  " + helpStyle.Render(fmtWhen(n.CreatedAt)+" ")
+				lines = append(lines, prefix+truncate(n.Body, m.detailWidth()-22))
+			}
 		}
+		return box.Render(strings.Join(lines, "\n"))
 	}
-	return detailBox.Width(m.detailWidth()).Render(strings.Join(lines, "\n"))
+
+	col3 := []string{detailLabel.Render("notes:")}
+	if len(job.Notes) == 0 {
+		col3 = append(col3, helpStyle.Render("  (none)"))
+	}
+	// Newest first — the most recently added note is the one the
+	// operator is most likely looking for after pressing 'e'.
+	for i := len(job.Notes) - 1; i >= 0; i-- {
+		n := job.Notes[i]
+		prefix := "  " + helpStyle.Render(fmtWhen(n.CreatedAt)+" ")
+		bodyW := col3W - 19
+		if bodyW < 10 {
+			bodyW = 10
+		}
+		col3 = append(col3, prefix+truncate(n.Body, bodyW))
+	}
+
+	left := lipgloss.NewStyle().Width(col1W).Render(strings.Join(col1, "\n"))
+	mid := lipgloss.NewStyle().Width(col2W).Render(strings.Join(col2, "\n"))
+	right := lipgloss.NewStyle().Width(col3W).Render(strings.Join(col3, "\n"))
+	gap := strings.Repeat(" ", gapW)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, gap, mid, gap, right)
+	return box.Render(header + "\n" + body)
 }
 
 func (m Model) detailWidth() int {
