@@ -143,6 +143,10 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 		return false, wrapDBError(err)
 	}
 
+	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "submitted"); err != nil {
+		return false, wrapDBError(err)
+	}
+
 	return true, wrapDBError(tx.Commit(ctx))
 }
 
@@ -186,6 +190,10 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
 		return false, false, wrapDBError(err)
 	}
 
+	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "status_changed"); err != nil {
+		return false, false, wrapDBError(err)
+	}
+
 	return true, false, wrapDBError(tx.Commit(ctx))
 }
 
@@ -218,6 +226,9 @@ func (s *Store) ApplyNoteAdded(ctx context.Context, ev events.JobNoteAdded) (app
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
     `, ev.JobID, ev.Body, ev.CreatedAt, ev.EventID); err != nil {
+		return false, false, wrapDBError(err)
+	}
+	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "note_added"); err != nil {
 		return false, false, wrapDBError(err)
 	}
 	return true, false, wrapDBError(tx.Commit(ctx))
@@ -308,6 +319,10 @@ func (s *Store) ApplyEdited(ctx context.Context, ev events.JobEdited) (applied b
 		return true, true, wrapDBError(tx.Commit(ctx))
 	}
 
+	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "edited"); err != nil {
+		return false, false, wrapDBError(err)
+	}
+
 	return true, false, wrapDBError(tx.Commit(ctx))
 }
 
@@ -368,6 +383,10 @@ func (s *Store) ApplyInterviewRecorded(ctx context.Context, ev events.JobIntervi
 		interviewers,
 		nullableStr(ev.Notes),
 	); err != nil {
+		return false, false, wrapDBError(err)
+	}
+
+	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "interview_recorded"); err != nil {
 		return false, false, wrapDBError(err)
 	}
 

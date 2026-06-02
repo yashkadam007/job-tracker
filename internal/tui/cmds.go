@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"job-tracker/internal/db"
 	"job-tracker/internal/events"
 	"job-tracker/internal/jobclient"
 )
@@ -62,6 +63,70 @@ type errMsg struct{ err error }
 
 // clearErrMsg is delivered on a timer to clear a transient error.
 type clearErrMsg struct{}
+
+// jobsChangedMsg is delivered by listenJobsChangedCmd when the Store
+// consumer fires NOTIFY jobs_changed inside an apply transaction (ADR
+// 0012). conn carries the dedicated LISTEN connection across re-arms;
+// see listenJobsChangedCmd for why it must be threaded through rather
+// than re-acquired per notification. err is set when the LISTEN
+// connection drops — the handler reloads via listJobsCmd and re-arms
+// the listen after a backoff.
+type jobsChangedMsg struct {
+	JobID string
+	Event string
+	conn  *pgxpool.Conn
+	err   error
+}
+
+// reconnectListenMsg is fired on a tea.Tick to re-arm the LISTEN after
+// a connection failure.
+type reconnectListenMsg struct{}
+
+// listenJobsChangedCmd holds one connection out of the pool and blocks
+// on WaitForNotification. The conn is dedicated — LISTEN is connection-
+// scoped, and releasing it back to the pool would drop the
+// subscription. On each notification the handler stores the conn back
+// onto the Model and re-arms with this cmd, passing existing through
+// so the same conn (and its in-flight LISTEN) is reused.
+//
+// existing == nil means "acquire a fresh conn and issue LISTEN"; that's
+// both the initial path (Init) and the reconnect path.
+func listenJobsChangedCmd(pool *pgxpool.Pool, existing *pgxpool.Conn) tea.Cmd {
+	return func() tea.Msg {
+		conn := existing
+		if conn == nil {
+			c, err := pool.Acquire(context.Background())
+			if err != nil {
+				return jobsChangedMsg{err: err}
+			}
+			if _, err := c.Exec(context.Background(), "LISTEN "+db.JobsChangedChannel); err != nil {
+				c.Release()
+				return jobsChangedMsg{err: err}
+			}
+			conn = c
+		}
+		n, err := conn.Conn().WaitForNotification(context.Background())
+		if err != nil {
+			conn.Release()
+			return jobsChangedMsg{err: err}
+		}
+		var payload struct {
+			JobID string `json:"job_id"`
+			Event string `json:"event"`
+		}
+		// Parse failure is non-fatal — the notification is a wakeup, not
+		// the event itself, so an empty JobID/Event still triggers the
+		// reconciling reload in the handler.
+		_ = json.Unmarshal([]byte(n.Payload), &payload)
+		return jobsChangedMsg{JobID: payload.JobID, Event: payload.Event, conn: conn}
+	}
+}
+
+// reconnectListenAfter returns a Cmd that fires reconnectListenMsg
+// after d — the backoff path when the LISTEN connection drops.
+func reconnectListenAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return reconnectListenMsg{} })
+}
 
 // listJobsCmd re-queries the catalog. Called on startup and after every
 // mutation to reconcile optimistic UI with the real store state.

@@ -144,6 +144,12 @@ type Model struct {
 
 	loading bool
 	err     string
+
+	// listenConn is the dedicated pgx connection that runs LISTEN
+	// jobs_changed (ADR 0012). Held across cmd re-arms because LISTEN is
+	// connection-scoped; nil between drop and reconnect. The TUI does
+	// not release this on shutdown — pool.Close() in main tears it down.
+	listenConn *pgxpool.Conn
 }
 
 // New constructs a Model ready to be passed to tea.NewProgram. The
@@ -223,7 +229,10 @@ func padRight(s string, n int) string {
 }
 
 func (m Model) Init() tea.Cmd {
-	return listJobsCmd(m.cfg.Reader, m.statusFilter)
+	return tea.Batch(
+		listJobsCmd(m.cfg.Reader, m.statusFilter),
+		listenJobsChangedCmd(m.cfg.Pool, nil),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -253,9 +262,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clearErrAfter(15*time.Second),
 			)
 		}
-		// Reconcile against the real store. The optimistic row update
-		// already happened on keypress.
-		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
+		// Reconciliation arrives via jobsChangedMsg once the Store
+		// consumer commits (ADR 0012). The optimistic row update already
+		// happened on keypress.
+		return m, nil
 
 	case snoozedMsg:
 		if msg.err != nil {
@@ -282,13 +292,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, clearErrAfter(15 * time.Second)
 		}
 		// Successful publish — reset modal scratch state so the next /n
-		// starts clean.
+		// starts clean. The row appears when LISTEN jobs_changed fires
+		// from the Store consumer's apply tx (ADR 0012).
 		m.newURL, m.newTitle, m.newCompany, m.newErr = "", "", "", ""
-		// Re-query so the new row appears once the Store consumer has
-		// processed the event. There's a small race here — if the
-		// reload arrives before the consumer commits, the row is
-		// briefly absent. Acceptable.
-		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
+		return m, nil
 
 	case editedMsg:
 		if msg.err != nil {
@@ -308,11 +315,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clearErrAfter(15*time.Second),
 			)
 		}
-		return m, listJobsCmd(m.cfg.Reader, m.statusFilter)
+		// Reconciliation arrives via jobsChangedMsg (ADR 0012).
+		return m, nil
 
 	case clearErrMsg:
 		m.err = ""
 		return m, nil
+
+	case jobsChangedMsg:
+		if msg.err != nil {
+			// Dropped LISTEN connection. Cold-path: reload now so any
+			// commits that landed during the gap are visible, surface
+			// the error in the banner, and re-arm the listen after a
+			// short backoff. The conn was released inside the cmd.
+			m.listenConn = nil
+			m.err = "listen: " + msg.err.Error()
+			return m, tea.Batch(
+				listJobsCmd(m.cfg.Reader, m.statusFilter),
+				clearErrAfter(15*time.Second),
+				reconnectListenAfter(time.Second),
+			)
+		}
+		m.listenConn = msg.conn
+		return m, tea.Batch(
+			listJobsCmd(m.cfg.Reader, m.statusFilter),
+			listenJobsChangedCmd(m.cfg.Pool, m.listenConn),
+		)
+
+	case reconnectListenMsg:
+		return m, listenJobsChangedCmd(m.cfg.Pool, nil)
 
 	case companiesLoadedMsg:
 		// Silent on error — the autocomplete is a nice-to-have, not a

@@ -81,3 +81,40 @@ When picked up:
 
 Explicitly out of scope: adding a third-party logging library or a log
 aggregator. `log/slog` is stdlib since Go 1.21; nothing else is needed.
+
+## Auto-fill title/company from URL on `jobs add`
+
+Source: noticed in passing.
+
+`jobs add` currently requires `--url`, `--title`, and `--company` all
+typed by hand. Most of that information is already in the posting page;
+re-typing it is the main friction in capturing an application.
+
+Sketch:
+
+- accept `jobs add --url <u>` with no `--title`/`--company`; fetch the
+  URL and extract metadata before publishing,
+- extraction order: JSON-LD `@type: JobPosting` (title,
+  `hiringOrganization.name`, `jobLocation`, `employmentType`,
+  `datePosted`) → OpenGraph (`og:title`, `og:site_name`) →
+  `<title>` tag,
+- explicit flags always win — scraped values fill the gaps and are
+  printed back so the operator can see what was inferred,
+- on extraction failure (login wall, 4xx, no recognisable metadata),
+  fall back to the current "title/company required" error rather than
+  publishing a junk event.
+
+Caveats:
+
+- LinkedIn and Indeed gate the real posting behind login/bot checks;
+  those URLs will usually yield a generic "Sign in" page. The scraper
+  must detect that and refuse, not guess.
+- Greenhouse / Lever / Ashby / Workday / most company ATS pages emit
+  clean JSON-LD, so the win is concentrated on direct-company URLs.
+- Outbound HTTP from the CLI is new surface area — bound the fetch with
+  a short timeout, cap response size, and don't follow redirects to
+  non-http(s) schemes.
+
+Related but out of scope here: a TUI-side "new job" form (would reduce
+flag-typing friction but doesn't address the underlying retyping
+problem).
