@@ -8,12 +8,14 @@ import "github.com/charmbracelet/lipgloss"
 // neutral greys so status colours in the detail panel pop.
 var (
 	statusStyles = map[string]lipgloss.Style{
-		"saved":     lipgloss.NewStyle().Foreground(lipgloss.Color("33")),  // blue
-		"applied":   lipgloss.NewStyle().Foreground(lipgloss.Color("220")), // yellow
-		"interview": lipgloss.NewStyle().Foreground(lipgloss.Color("177")), // purple
-		"offer":     lipgloss.NewStyle().Foreground(lipgloss.Color("42")),  // green
-		"rejected":  lipgloss.NewStyle().Foreground(lipgloss.Color("244")), // grey
-		"withdrawn": lipgloss.NewStyle().Foreground(lipgloss.Color("244")), // grey
+		"saved":      lipgloss.NewStyle().Foreground(lipgloss.Color("33")),  // blue
+		"applied":    lipgloss.NewStyle().Foreground(lipgloss.Color("220")), // yellow
+		"assessment": lipgloss.NewStyle().Foreground(lipgloss.Color("214")), // orange — adjacent to applied/interview
+		"interview":  lipgloss.NewStyle().Foreground(lipgloss.Color("177")), // purple
+		"offer":      lipgloss.NewStyle().Foreground(lipgloss.Color("42")),  // green
+		"rejected":   lipgloss.NewStyle().Foreground(lipgloss.Color("244")), // grey
+		"declined":   lipgloss.NewStyle().Foreground(lipgloss.Color("244")), // grey — terminal
+		"withdrawn":  lipgloss.NewStyle().Foreground(lipgloss.Color("244")), // grey
 	}
 
 	titleStyle = lipgloss.NewStyle().

@@ -27,12 +27,14 @@ const (
 type JobStatus string
 
 const (
-	StatusSaved     JobStatus = "saved"
-	StatusApplied   JobStatus = "applied"
-	StatusInterview JobStatus = "interview"
-	StatusRejected  JobStatus = "rejected"
-	StatusOffer     JobStatus = "offer"
-	StatusWithdrawn JobStatus = "withdrawn"
+	StatusSaved       JobStatus = "saved"
+	StatusApplied     JobStatus = "applied"
+	StatusAssessment  JobStatus = "assessment"
+	StatusInterview   JobStatus = "interview"
+	StatusOffer       JobStatus = "offer"
+	StatusRejected    JobStatus = "rejected"
+	StatusDeclined    JobStatus = "declined"
+	StatusWithdrawn   JobStatus = "withdrawn"
 )
 
 type WorkMode string

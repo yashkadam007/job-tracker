@@ -194,11 +194,11 @@ func New(cfg Config) Model {
 
 func defaultColumns(width int) []table.Column {
 	// status • title • company • last_event
-	// statusW = 11 leaves one space past the widest status ("interview"=9)
-	// so column truncation can't bleed into the title column.
-	// lastW = 16 matches the "2006-01-02 15:04" format.
+	// statusW = 12 leaves one space past the widest status
+	// ("assessment"=10) so column truncation can't bleed into the
+	// title column. lastW = 16 matches the "2006-01-02 15:04" format.
 	// Reserve 2 chars on the left for the gutter overlay added in tableView.
-	statusW := 11
+	statusW := 12
 	lastW := 16
 	rest := width - statusW - lastW - 6 - 2
 	if rest < 30 {
@@ -427,10 +427,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.applyStatus(events.StatusRejected)
 	case "a":
 		return m.applyStatus(events.StatusApplied)
+	case "A":
+		// shift-a — assessment (take-home outstanding). ADR 0013.
+		return m.applyStatus(events.StatusAssessment)
 	case "i":
 		return m.applyStatus(events.StatusInterview)
 	case "o":
 		return m.applyStatus(events.StatusOffer)
+	case "D":
+		// shift-d — candidate declined an offer. ADR 0013.
+		return m.applyStatus(events.StatusDeclined)
 	case "w":
 		return m.applyStatus(events.StatusWithdrawn)
 	case "S":
@@ -630,9 +636,24 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // applyStatus is the optimistic-update path: mutate the in-memory row
 // immediately so the keystroke feels instant, fire the event, and let
 // the follow-up List reconcile against the real store state.
+//
+// Illegal transitions (ADR 0013) are rejected at the keypress — the
+// Store would silently skip the publish anyway, so failing here gives
+// the operator a "why nothing happened" signal in the status line. UI
+// ergonomics, not authoritative validation: a misbehaving frontend
+// could still publish; the Store is the line that holds.
 func (m Model) applyStatus(s events.JobStatus) (tea.Model, tea.Cmd) {
 	job, ok := m.selectedJob()
 	if !ok {
+		return m, nil
+	}
+	if !events.CanTransition(job.Status, s) {
+		m.info = fmt.Sprintf("can't change %s → %s", job.Status, s)
+		return m, clearInfoAfter(3 * time.Second)
+	}
+	// Same-status keypress is a legal idempotent no-op — don't bother
+	// publishing an event the Store would just skip.
+	if job.Status == s {
 		return m, nil
 	}
 	// Mutate both jobs and view (view is just a filtered alias).
@@ -676,7 +697,7 @@ func (m *Model) applyFilter() {
 		// panel). Mixing ANSI escapes with bubbles/table column
 		// truncation produced the title-column bleed.
 		rows = append(rows, table.Row{
-			padRight(string(j.Status), 9),
+			padRight(string(j.Status), 10),
 			truncate(j.Title, 60),
 			truncate(j.Company, 30),
 			fmtWhen(j.LastEventAt),
@@ -688,8 +709,9 @@ func (m *Model) applyFilter() {
 
 // setTableHeight shrinks the table to the row count when rows fit, so a
 // small result set doesn't strand the detail panel at the bottom of the
-// terminal. Reserves 14 rows for the surrounding chrome (title, pill,
-// three rules, detail block, three-line help, error line).
+// terminal. Reserves 15 rows for the surrounding chrome (title, pill,
+// three rules, detail block, two-line help, error line) — the help row
+// gained a second line in ADR 0013 when A/D keybinds landed.
 //
 // SetHeight in bubbles/table v1.0.0 sets viewport.Height to
 // (h - headersView.Height). Our header has a bottom border, so its
@@ -700,7 +722,7 @@ func (m *Model) setTableHeight() {
 		return
 	}
 	const headerH = 2
-	maxH := m.height - 14
+	maxH := m.height - 15
 	if maxH < headerH+1 {
 		maxH = headerH + 1
 	}
@@ -739,11 +761,12 @@ func truncate(s string, n int) string {
 }
 
 // nextStatusFilter advances the status pill: any → saved → applied →
-// interview → offer → rejected → withdrawn → any.
+// assessment → interview → offer → rejected → declined → withdrawn → any.
 func nextStatusFilter(cur *events.JobStatus) *events.JobStatus {
 	order := []events.JobStatus{
-		events.StatusSaved, events.StatusApplied, events.StatusInterview,
-		events.StatusOffer, events.StatusRejected, events.StatusWithdrawn,
+		events.StatusSaved, events.StatusApplied, events.StatusAssessment,
+		events.StatusInterview, events.StatusOffer,
+		events.StatusRejected, events.StatusDeclined, events.StatusWithdrawn,
 	}
 	if cur == nil {
 		s := order[0]
@@ -957,12 +980,18 @@ func (m Model) detailWidth() int {
 }
 
 func (m Model) viewHelp() string {
-	keys := []string{
+	// Common path on the first line; the two ADR-0013 capitals
+	// (A=assessment, D=declined) sit with the less common transitions
+	// on the second so the muscle-memory keys stay visually grouped.
+	primary := []string{
 		"a=applied", "i=interview", "o=offer", "r=rejected", "w=withdrawn",
-		"S=saved", "s=snooze1d", "n=new", "e=edit", "y=copy url", "/=search", "f=filter", "R=reload",
+		"S=saved", "A=assessment", "D=declined",
+	}
+	secondary := []string{
+		"s=snooze1d", "n=new", "e=edit", "y=copy url", "/=search", "f=filter", "R=reload",
 		"H=health", "q=quit",
 	}
-	return helpStyle.Render(strings.Join(keys, "  "))
+	return helpStyle.Render(strings.Join(primary, "  ") + "\n" + strings.Join(secondary, "  "))
 }
 
 // viewStatus renders the ADR 0006 skip-count panel. Each consumer's

@@ -151,35 +151,93 @@ func (s *Store) ApplySubmitted(ctx context.Context, ev events.JobSubmitted) (app
 }
 
 // ApplyStatusChanged updates the status of an existing job and appends
-// a history row. missing=true means the job_id wasn't in the table
-// (status arrived before submit).
-func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, missing bool, err error) {
+// a history row.
+//
+//   - missing=true  → no row in jobs for ev.JobID (status before submit).
+//   - illegal=true  → the row exists but (current → ev.Status) is not in
+//     AllowedTransitions (ADR 0013). Event is still claimed so the
+//     consumer commits the offset; the caller logs at WARN.
+//
+// Same-status events are idempotent no-ops, with one carve-out:
+// interview → interview re-emits represent multi-round progression
+// (phone screen → technical → …). The Store writes a fresh history row
+// when the incoming changed_at is strictly newer than the most recent
+// history row for the job; older or equal timestamps fall through to
+// the regular no-op path.
+func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChanged) (applied bool, missing bool, illegal bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, false, wrapDBError(err)
+		return false, false, false, wrapDBError(err)
 	}
 	defer tx.Rollback(ctx)
 
 	if err := db.ClaimEvent(ctx, tx, Consumer, ev.EventID); err != nil {
 		if errors.Is(err, db.ErrAlreadyProcessed) {
-			return false, false, nil
+			return false, false, false, nil
 		}
-		return false, false, wrapDBError(err)
+		return false, false, false, wrapDBError(err)
 	}
 
-	ct, err := tx.Exec(ctx, `
+	var current events.JobStatus
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM jobs WHERE job_id = $1`, ev.JobID,
+	).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, true, false, wrapDBError(tx.Commit(ctx))
+	}
+	if err != nil {
+		return false, false, false, wrapDBError(err)
+	}
+
+	if !events.CanTransition(current, ev.Status) {
+		// Permanently-bad message class (ADR 0006). Claim the event,
+		// commit the no-op, let the caller log.
+		return true, false, true, wrapDBError(tx.Commit(ctx))
+	}
+
+	if current == ev.Status {
+		// Idempotent same-status path. The interview → interview
+		// multi-round carve-out (ADR 0013 Notes) writes a history row
+		// when the incoming changed_at strictly leads the latest in
+		// the table; every other same-status pair skips the insert
+		// to avoid duplicate "X at the same time" rows.
+		if current == events.StatusInterview {
+			var newer bool
+			if err := tx.QueryRow(ctx, `
+                SELECT $2::timestamptz > COALESCE(MAX(changed_at), 'epoch'::timestamptz)
+                  FROM job_status_history
+                 WHERE job_id = $1
+            `, ev.JobID, ev.ChangedAt).Scan(&newer); err != nil {
+				return false, false, false, wrapDBError(err)
+			}
+			if newer {
+				if _, err := tx.Exec(ctx,
+					`UPDATE jobs SET last_event_at = $2 WHERE job_id = $1`,
+					ev.JobID, ev.ChangedAt); err != nil {
+					return false, false, false, wrapDBError(err)
+				}
+				if _, err := tx.Exec(ctx, `
+                    INSERT INTO job_status_history (job_id, status, changed_at, event_id)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (event_id) DO NOTHING
+                `, ev.JobID, string(ev.Status), ev.ChangedAt, ev.EventID); err != nil {
+					return false, false, false, wrapDBError(err)
+				}
+				if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "status_changed"); err != nil {
+					return false, false, false, wrapDBError(err)
+				}
+			}
+		}
+		return true, false, false, wrapDBError(tx.Commit(ctx))
+	}
+
+	if _, err := tx.Exec(ctx, `
         UPDATE jobs
            SET status        = $2,
                last_event_at = $3
          WHERE job_id = $1
-    `, ev.JobID, string(ev.Status), ev.ChangedAt)
-	if err != nil {
-		return false, false, wrapDBError(err)
-	}
-	if ct.RowsAffected() == 0 {
-		// Don't write a history row for a job we don't have; the FK
-		// would reject it anyway. Let the caller log and move on.
-		return true, true, wrapDBError(tx.Commit(ctx))
+    `, ev.JobID, string(ev.Status), ev.ChangedAt); err != nil {
+		return false, false, false, wrapDBError(err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -187,14 +245,14 @@ func (s *Store) ApplyStatusChanged(ctx context.Context, ev events.JobStatusChang
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (event_id) DO NOTHING
     `, ev.JobID, string(ev.Status), ev.ChangedAt, ev.EventID); err != nil {
-		return false, false, wrapDBError(err)
+		return false, false, false, wrapDBError(err)
 	}
 
 	if err := db.NotifyJobsChanged(ctx, tx, ev.JobID, "status_changed"); err != nil {
-		return false, false, wrapDBError(err)
+		return false, false, false, wrapDBError(err)
 	}
 
-	return true, false, wrapDBError(tx.Commit(ctx))
+	return true, false, false, wrapDBError(tx.Commit(ctx))
 }
 
 // ApplyNoteAdded appends a note to a job's timeline. missing=true if

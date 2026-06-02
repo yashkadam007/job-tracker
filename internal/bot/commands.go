@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"job-tracker/internal/events"
 	"job-tracker/internal/jobclient"
@@ -185,11 +187,38 @@ func (b *Bot) cmdStatusByIndex(ctx context.Context, chatID int64, rest string, s
 		b.reply(ctx, fmt.Sprintf("No job #%d in the last /list (or list is empty).", n))
 		return
 	}
-	b.publishStatus(ctx, job.JobID, status)
-	b.reply(ctx, fmt.Sprintf("%s @ %s → %s", job.Title, job.Company, status))
+	if b.publishStatus(ctx, job.JobID, status) {
+		b.reply(ctx, fmt.Sprintf("%s @ %s → %s", job.Title, job.Company, status))
+	}
 }
 
-func (b *Bot) publishStatus(ctx context.Context, jobID string, status events.JobStatus) {
+// publishStatus emits a JobStatusChanged event after gating on
+// transition legality (ADR 0013). Returns false when nothing was
+// published — either the transition is illegal, or the publish
+// failed; in both cases publishStatus has already reported to chat,
+// so the caller should suppress its cosmetic "Marked X" confirmation.
+func (b *Bot) publishStatus(ctx context.Context, jobID string, status events.JobStatus) bool {
+	// Read the current status and reject illegal transitions in chat
+	// so the existing Applied / Rejected buttons stop misfiring on
+	// terminal rows. The Store still re-checks authoritatively; this
+	// is just a friendlier "why nothing happened" path for the
+	// operator. pgx.ErrNoRows = "no row yet" — let it through; the
+	// Store will log the missing case.
+	var current events.JobStatus
+	switch err := b.cfg.Pool.QueryRow(ctx,
+		`SELECT status FROM jobs WHERE job_id = $1`, jobID,
+	).Scan(&current); {
+	case err == nil:
+		if !events.CanTransition(current, status) {
+			b.reply(ctx, fmt.Sprintf("can't change %s → %s", current, status))
+			return false
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		// fall through; Store handles missing.
+	default:
+		log.Printf("bot: read current status job_id=%s: %v", jobID, err)
+	}
+
 	ev := events.JobStatusChanged{
 		EventID:   uuid.NewString(),
 		JobID:     jobID,
@@ -201,11 +230,13 @@ func (b *Bot) publishStatus(ctx context.Context, jobID string, status events.Job
 	if err := b.cfg.Publisher.ChangeStatus(pubCtx, ev); err != nil {
 		if jobclient.IsValidationError(err) {
 			b.reply(ctx, err.Error())
-			return
+			return false
 		}
 		log.Printf("bot: publish JobStatusChanged: %v", err)
 		b.reply(ctx, "Failed to update status: "+err.Error())
+		return false
 	}
+	return true
 }
 
 // isKnownStatus guards against typos in `/list <status>`. The list is

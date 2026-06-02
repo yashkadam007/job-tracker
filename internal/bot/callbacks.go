@@ -28,9 +28,12 @@ func (b *Bot) handleCallback(ctx context.Context, q *telegram.CallbackQuery) {
 			return
 		}
 		status, jobID := events.JobStatus(cb.Args[0]), cb.Args[1]
-		b.publishStatus(ctx, jobID, status)
-		b.answer(ctx, q.ID, "Marked "+string(status))
-		b.reply(ctx, fmt.Sprintf("✓ job %s → %s", jobID, status))
+		if b.publishStatus(ctx, jobID, status) {
+			b.answer(ctx, q.ID, "Marked "+string(status))
+			b.reply(ctx, fmt.Sprintf("✓ job %s → %s", jobID, status))
+		} else {
+			b.answer(ctx, q.ID, "")
+		}
 	case telegram.CallbackActionSnooze:
 		if len(cb.Args) != 1 {
 			b.answer(ctx, q.ID, "bad snooze callback")

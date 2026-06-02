@@ -187,7 +187,7 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 		if err := json.Unmarshal(r.Value, &ev); err != nil {
 			return fmt.Errorf("%w: %w", store.ErrDecode, err)
 		}
-		applied, missing, err := st.ApplyStatusChanged(ctx, ev)
+		applied, missing, illegal, err := st.ApplyStatusChanged(ctx, ev)
 		if err != nil {
 			return err
 		}
@@ -196,6 +196,14 @@ func handle(ctx context.Context, st *store.Store, r *kgo.Record) error {
 			log.Printf("status: dup event_id=%s skipped", ev.EventID)
 		case missing:
 			log.Printf("status: no job for job_id=%s (status event before submit?)", ev.JobID)
+		case illegal:
+			// ADR 0013: the row exists but (current → ev.Status) is
+			// not legal. Event is committed (no infinite retry); log
+			// so the operator can spot a buggy frontend. job_id +
+			// target status — current status lives in the DB we just
+			// SELECT'd from and the operator can correlate.
+			log.Printf("WARN status: illegal transition for job_id=%s target=%s (event_id=%s)",
+				ev.JobID, ev.Status, ev.EventID)
 		default:
 			log.Printf("status: %s → %s", ev.JobID, ev.Status)
 		}

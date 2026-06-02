@@ -6,12 +6,18 @@ package events
 // (TUI dropdown, bot keyboard). A drift-detection test in jobclient
 // parses schema.sql and asserts these match.
 
+// Slice order is load-bearing: AllowedNext (transitions.go) emits its
+// result in this order, so any UI that depends on a stable "next status"
+// ordering follows this list. Keep it in graph order (saved → applied
+// → assessment → interview → offer; terminals at the end).
 var AllowedStatuses = []JobStatus{
 	StatusSaved,
 	StatusApplied,
+	StatusAssessment,
 	StatusInterview,
-	StatusRejected,
 	StatusOffer,
+	StatusRejected,
+	StatusDeclined,
 	StatusWithdrawn,
 }
 
