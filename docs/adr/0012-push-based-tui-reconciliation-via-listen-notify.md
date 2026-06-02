@@ -153,7 +153,7 @@ described in the Issue.
 
 ## Status
 
-Accepted.
+Implemented.
 
 ## Group
 

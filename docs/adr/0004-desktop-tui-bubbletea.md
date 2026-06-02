@@ -68,7 +68,7 @@ Out of scope for v1:
 
 ## Status
 
-Approved.
+Implemented.
 
 ## Group
 

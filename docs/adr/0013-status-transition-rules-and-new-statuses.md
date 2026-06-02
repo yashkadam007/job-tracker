@@ -226,7 +226,7 @@ publish an illegal change; the Store is the line that holds.
 
 ## Status
 
-Accepted.
+Implemented.
 
 ## Group
 

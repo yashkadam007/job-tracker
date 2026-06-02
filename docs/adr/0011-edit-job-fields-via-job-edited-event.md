@@ -162,7 +162,7 @@ choreography a multi-input form would require.
 
 ## Status
 
-Accepted.
+Implemented.
 
 ## Group
 

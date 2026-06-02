@@ -82,7 +82,7 @@ is a guaranteed-no-publish; the Kafka client is not touched.
 
 ## Status
 
-Accepted.
+Implemented.
 
 ## Group
 

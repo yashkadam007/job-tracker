@@ -122,7 +122,7 @@ land without a follow-up migration.
 
 ## Status
 
-Accepted.
+Implemented.
 
 ## Group
 

@@ -109,7 +109,7 @@ Concretely:
 
 ## Status
 
-Proposed.
+Implemented.
 
 ## Group
 
