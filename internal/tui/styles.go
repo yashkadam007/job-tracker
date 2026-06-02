@@ -22,7 +22,8 @@ var (
 
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
-	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	infoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 
 	pillStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
 

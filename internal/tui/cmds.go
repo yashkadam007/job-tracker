@@ -64,6 +64,10 @@ type errMsg struct{ err error }
 // clearErrMsg is delivered on a timer to clear a transient error.
 type clearErrMsg struct{}
 
+// clearInfoMsg is delivered on a timer to clear a transient info flash
+// (e.g. the "copied url" confirmation).
+type clearInfoMsg struct{}
+
 // jobsChangedMsg is delivered by listenJobsChangedCmd when the Store
 // consumer fires NOTIFY jobs_changed inside an apply transaction (ADR
 // 0012). conn carries the dedicated LISTEN connection across re-arms;
@@ -249,6 +253,11 @@ func snoozeCmd(pool *pgxpool.Pool, jobID string) tea.Cmd {
 // auto-dismiss the transient error line.
 func clearErrAfter(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return clearErrMsg{} })
+}
+
+// clearInfoAfter returns a Cmd that fires clearInfoMsg after d.
+func clearInfoAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return clearInfoMsg{} })
 }
 
 // skipCountResult is one row of the status panel — the result of

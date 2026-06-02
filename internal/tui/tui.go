@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -144,6 +145,7 @@ type Model struct {
 
 	loading bool
 	err     string
+	info    string
 
 	// listenConn is the dedicated pgx connection that runs LISTEN
 	// jobs_changed (ADR 0012). Held across cmd re-arms because LISTEN is
@@ -322,6 +324,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = ""
 		return m, nil
 
+	case clearInfoMsg:
+		m.info = ""
+		return m, nil
+
 	case jobsChangedMsg:
 		if msg.err != nil {
 			// Dropped LISTEN connection. Cold-path: reload now so any
@@ -454,6 +460,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.enterEditMode(job)
 		return m, nil
+	case "y":
+		job, ok := m.selectedJob()
+		if !ok {
+			return m, nil
+		}
+		if job.URL == "" {
+			m.err = "copy url: no url on this job"
+			return m, clearErrAfter(5 * time.Second)
+		}
+		if err := clipboard.WriteAll(job.URL); err != nil {
+			m.err = "copy url: " + err.Error()
+			return m, clearErrAfter(5 * time.Second)
+		}
+		m.info = "copied url"
+		return m, clearInfoAfter(2 * time.Second)
 	}
 
 	var cmd tea.Cmd
@@ -775,6 +796,9 @@ func (m Model) View() string {
 	if m.err != "" {
 		bottom.WriteString("\n")
 		bottom.WriteString(errStyle.Render(m.err))
+	} else if m.info != "" {
+		bottom.WriteString("\n")
+		bottom.WriteString(infoStyle.Render(m.info))
 	}
 
 	topStr := top.String()
@@ -935,7 +959,7 @@ func (m Model) detailWidth() int {
 func (m Model) viewHelp() string {
 	keys := []string{
 		"a=applied", "i=interview", "o=offer", "r=rejected", "w=withdrawn",
-		"S=saved", "s=snooze1d", "n=new", "e=edit", "/=search", "f=filter", "R=reload",
+		"S=saved", "s=snooze1d", "n=new", "e=edit", "y=copy url", "/=search", "f=filter", "R=reload",
 		"H=health", "q=quit",
 	}
 	return helpStyle.Render(strings.Join(keys, "  "))
