@@ -23,6 +23,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -63,6 +64,7 @@ const (
 	modeSearch
 	modeStatus
 	modeEdit
+	modeEditDescription
 )
 
 // newStep tracks which field of the new-job form the user is filling.
@@ -141,6 +143,8 @@ type Model struct {
 	editCustomTags   *[]string
 	editPriority     *int
 	editExpectedComp *float64
+	editDescription  *string
+	editTextarea     textarea.Model
 	editNote         string
 
 	loading bool
@@ -244,6 +248,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.tbl.SetColumns(defaultColumns(m.width))
 		m.setTableHeight()
+		m.editTextarea.SetWidth(m.editTextareaWidth())
+		m.editTextarea.SetHeight(m.editTextareaHeight())
 		return m, nil
 
 	case jobsLoadedMsg:
@@ -386,6 +392,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleStatusKey(msg)
 	case modeEdit:
 		return m.handleEditKey(msg)
+	case modeEditDescription:
+		return m.handleEditDescriptionKey(msg)
 	}
 
 	// modeList
@@ -795,6 +803,9 @@ func (m Model) View() string {
 	}
 	if m.mode == modeEdit {
 		return m.viewEdit()
+	}
+	if m.mode == modeEditDescription {
+		return m.viewEditDescription()
 	}
 
 	w := m.width

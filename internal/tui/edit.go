@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -28,6 +29,7 @@ const (
 	editKindEnum                              // work_mode, source
 	editKindNumber                            // priority, expected_comp
 	editKindTags                              // tech_tags, custom_tags
+	editKindDescription                       // description — opens a textarea sub-mode
 	editKindNote                              // virtual "new note" appender
 )
 
@@ -53,6 +55,7 @@ var editFields = []editField{
 	{key: "custom_tags", label: "custom tags", kind: editKindTags},
 	{key: "priority", label: "priority", kind: editKindNumber},
 	{key: "expected_comp", label: "expected comp", kind: editKindNumber},
+	{key: "description", label: "description", kind: editKindDescription},
 	{key: "note", label: "+ new note", kind: editKindNote},
 }
 
@@ -74,6 +77,7 @@ func (m *Model) enterEditMode(job jobclient.Job) {
 	m.editCustomTags = nil
 	m.editPriority = nil
 	m.editExpectedComp = nil
+	m.editDescription = nil
 	m.editNote = ""
 }
 
@@ -105,6 +109,10 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editEnumIdx = m.currentEnumIndex(f)
 			return m, nil
+		case editKindDescription:
+			m.mode = modeEditDescription
+			m.editTextarea = newEditTextarea(m.currentDescription(), m.editTextareaWidth(), m.editTextareaHeight())
+			return m, textarea.Blink
 		case editKindRequiredText, editKindText, editKindNumber, editKindTags, editKindNote:
 			m.editing = true
 			m.editInput = newEditInput(m.currentFieldString(f))
@@ -113,6 +121,76 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handleEditDescriptionKey owns input while the description textarea is
+// open. Ctrl+S stages the typed value onto editDescription and returns
+// to the field list; Esc discards. Everything else flows to the
+// textarea (movement, paste, backspace, …).
+func (m Model) handleEditDescriptionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeEdit
+		m.editTextarea.Blur()
+		return m, nil
+	case "ctrl+s":
+		v := m.editTextarea.Value()
+		m.editDescription = &v
+		m.mode = modeEdit
+		m.editTextarea.Blur()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.editTextarea, cmd = m.editTextarea.Update(msg)
+	return m, cmd
+}
+
+// newEditTextarea returns a textarea pre-populated with v, sized to the
+// modal body. Width/height come from the caller because the Model owns
+// terminal dimensions.
+func newEditTextarea(v string, width, height int) textarea.Model {
+	ta := textarea.New()
+	ta.CharLimit = 0
+	ta.SetWidth(width)
+	ta.SetHeight(height)
+	ta.SetValue(v)
+	ta.Focus()
+	return ta
+}
+
+// currentDescription returns the staged description if set, otherwise
+// the snapshot from the job row. Used to pre-populate the textarea.
+func (m Model) currentDescription() string {
+	if m.editDescription != nil {
+		return *m.editDescription
+	}
+	return m.editJob.Description
+}
+
+// editTextareaWidth / editTextareaHeight derive the textarea's display
+// box from the current terminal size. modalBox has a 1×2 border + 1×2
+// padding (rounded border on all sides, padding 1, 2); the textarea
+// fills the modal body inside that.
+func (m Model) editTextareaWidth() int {
+	w := m.width - 6
+	if w < 40 {
+		return 40
+	}
+	if w > 120 {
+		return 120
+	}
+	return w
+}
+
+func (m Model) editTextareaHeight() int {
+	h := m.height - 10
+	if h < 5 {
+		return 5
+	}
+	if h > 30 {
+		return 30
+	}
+	return h
 }
 
 // handleEditFieldKey handles keystrokes while an individual field is
@@ -248,10 +326,29 @@ func (m Model) currentFieldString(f editField) string {
 			return strconv.FormatFloat(*m.editJob.ExpectedComp, 'f', -1, 64)
 		}
 		return ""
+	case "description":
+		return firstLineSnippet(m.currentDescription(), 80)
 	case "note":
 		return m.editNote
 	}
 	return ""
+}
+
+// firstLineSnippet returns the first line of s, truncated to max runes
+// with a trailing "…" if it had to cut. Rune-aware so multi-byte
+// characters (em-dashes, currency symbols) aren't split mid-codepoint.
+func firstLineSnippet(s string, max int) string {
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // commitEnum stores the enum field's currently-highlighted option onto
@@ -366,6 +463,7 @@ func (m Model) publishEdit() (tea.Model, tea.Cmd) {
 		CustomTags:   m.editCustomTags,
 		Priority:     m.editPriority,
 		ExpectedComp: m.editExpectedComp,
+		Description:  m.editDescription,
 	}
 	note := strings.TrimSpace(m.editNote)
 	if !hasStagedEdit(ev) && note == "" {
@@ -389,7 +487,8 @@ func hasStagedEdit(ev events.JobEdited) bool {
 		ev.TechTags != nil ||
 		ev.CustomTags != nil ||
 		ev.Priority != nil ||
-		ev.ExpectedComp != nil
+		ev.ExpectedComp != nil ||
+		ev.Description != nil
 }
 
 // viewEdit renders the modal. List of fields with current values; the
@@ -451,6 +550,21 @@ func (m Model) renderFieldValue(f editField, active bool) string {
 	return val
 }
 
+// viewEditDescription renders the textarea sub-mode opened from the
+// description row of the edit modal. Header names the job; the
+// textarea fills the body; footer hint labels the stage / cancel
+// keybinds (distinct from the modal-level save / close labels).
+func (m Model) viewEditDescription() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(fmt.Sprintf("edit description — %s @ %s",
+		truncate(m.editJob.Title, 40), truncate(m.editJob.Company, 30))))
+	b.WriteString("\n\n")
+	b.WriteString(m.editTextarea.View())
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("ctrl+s=stage  esc=cancel"))
+	return modalBox.Render(b.String())
+}
+
 // fieldStaged reports whether the operator has staged a change for
 // the named field on this modal session.
 func (m Model) fieldStaged(key string) bool {
@@ -473,6 +587,8 @@ func (m Model) fieldStaged(key string) bool {
 		return m.editPriority != nil
 	case "expected_comp":
 		return m.editExpectedComp != nil
+	case "description":
+		return m.editDescription != nil
 	case "note":
 		return strings.TrimSpace(m.editNote) != ""
 	}

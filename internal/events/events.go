@@ -160,6 +160,7 @@ type JobEdited struct {
 	CustomTags   *[]string `json:"custom_tags,omitempty"`
 	Priority     *int      `json:"priority,omitempty"`
 	ExpectedComp *float64  `json:"expected_comp,omitempty"`
+	Description  *string   `json:"description,omitempty"`
 }
 
 // JobStatusChanged is published when an existing job's status changes

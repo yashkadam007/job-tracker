@@ -158,7 +158,8 @@ func hasAnyEditField(ev events.JobEdited) bool {
 		ev.TechTags != nil ||
 		ev.CustomTags != nil ||
 		ev.Priority != nil ||
-		ev.ExpectedComp != nil
+		ev.ExpectedComp != nil ||
+		ev.Description != nil
 }
 
 func validateNoteAdded(ev events.JobNoteAdded) error {

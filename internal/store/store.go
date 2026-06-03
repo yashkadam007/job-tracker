@@ -364,6 +364,9 @@ func (s *Store) ApplyEdited(ctx context.Context, ev events.JobEdited) (applied b
 			add("expected_comp", *ev.ExpectedComp)
 		}
 	}
+	if ev.Description != nil {
+		add("description", nullableStr(*ev.Description))
+	}
 
 	// last_event_at always bumped on a successful edit apply.
 	sets = append(sets, "last_event_at = $2")
