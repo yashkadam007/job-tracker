@@ -261,8 +261,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.tbl.SetColumns(defaultColumns(m.width))
 		m.setTableHeight()
-		m.editTextarea.SetWidth(m.editTextareaWidth())
-		m.editTextarea.SetHeight(m.editTextareaHeight())
+		if m.mode == modeEditDescription {
+			m.editTextarea.SetWidth(m.editTextareaWidth())
+			m.editTextarea.SetHeight(m.editTextareaHeight())
+		}
 		return m, nil
 
 	case jobsLoadedMsg:
