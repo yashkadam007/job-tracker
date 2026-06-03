@@ -206,13 +206,16 @@ func New(cfg Config) Model {
 	}
 }
 
+// statusColW is the fixed width of the status column. 12 leaves one space
+// past the widest status ("assessment"=10+prefix "▶ "=2) and is also used
+// in tableView to identify the status cell slice for post-render colorising.
+const statusColW = 12
+
 func defaultColumns(width int) []table.Column {
 	// status • title • company • last_event
-	// statusW = 12 leaves one space past the widest status
-	// ("assessment"=10) so column truncation can't bleed into the
-	// title column. lastW = 16 matches the "2006-01-02 15:04" format.
+	// lastW = 16 matches the "2006-01-02 15:04" format.
 	// Reserve 2 chars on the left for the gutter overlay added in tableView.
-	statusW := 12
+	statusW := statusColW
 	lastW := 16
 	rest := width - statusW - lastW - 6 - 2
 	if rest < 30 {
@@ -913,6 +916,12 @@ func (m Model) View() string {
 // the selected row, blank on every other. Done as post-processing
 // because bubbles/table v0 has no per-row prefix hook — wrapping each
 // rendered line is cheaper than forking the widget.
+//
+// It also colorises the status cell of action-needed rows (saved,
+// assessment) after the table has rendered — safe because non-selected
+// rows are plain text at this point, so slicing the first statusColW
+// bytes captures exactly the status cell without any ANSI confusion.
+// Selected rows are left plain (selection background is highlight enough).
 func (m Model) tableView() string {
 	raw := m.tbl.View()
 	lines := strings.Split(raw, "\n")
@@ -924,6 +933,17 @@ func (m Model) tableView() string {
 		selRow = headerLines + m.tbl.Cursor()
 	}
 	for i := range lines {
+		jobIdx := i - headerLines
+		isBody := jobIdx >= 0 && jobIdx < len(m.view)
+		if isBody && i != selRow {
+			job := m.view[jobIdx]
+			if st, ok := statusStyles[string(job.Status)]; ok &&
+				(job.Status == events.StatusSaved || job.Status == events.StatusAssessment) {
+				if len(lines[i]) >= statusColW {
+					lines[i] = st.Render(lines[i][:statusColW]) + lines[i][statusColW:]
+				}
+			}
+		}
 		if i == selRow && i >= 0 && i < len(lines) {
 			lines[i] = gutterStyle.Render("▌") + " " + lines[i]
 		} else {
