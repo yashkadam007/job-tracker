@@ -364,6 +364,23 @@ func (s *Store) ApplyEdited(ctx context.Context, ev events.JobEdited) (applied b
 			add("expected_comp", *ev.ExpectedComp)
 		}
 	}
+	if ev.CompMin != nil {
+		if *ev.CompMin == 0 {
+			add("comp_min", nil)
+		} else {
+			add("comp_min", *ev.CompMin)
+		}
+	}
+	if ev.CompMax != nil {
+		if *ev.CompMax == 0 {
+			add("comp_max", nil)
+		} else {
+			add("comp_max", *ev.CompMax)
+		}
+	}
+	if ev.CompCurrency != nil {
+		add("comp_currency", nullableStr(*ev.CompCurrency))
+	}
 	if ev.Description != nil {
 		add("description", nullableStr(*ev.Description))
 	}

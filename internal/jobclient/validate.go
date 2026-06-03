@@ -133,6 +133,26 @@ func validateEdited(ev events.JobEdited) error {
 			return fmt.Errorf("%w: %v; must be > 0", ErrInvalidExpectedComp, *ev.ExpectedComp)
 		}
 	}
+	// Compensation range. Each side is sparse-by-default: a zero
+	// dereference means clear-to-NULL, so only non-zero staged values
+	// participate in the range check. Currency clears when *CompCurrency
+	// == "" and is allow-listed otherwise.
+	if ev.CompMin != nil || ev.CompMax != nil || ev.CompCurrency != nil {
+		var minV, maxV *float64
+		if ev.CompMin != nil && *ev.CompMin != 0 {
+			minV = ev.CompMin
+		}
+		if ev.CompMax != nil && *ev.CompMax != 0 {
+			maxV = ev.CompMax
+		}
+		var currency string
+		if ev.CompCurrency != nil {
+			currency = *ev.CompCurrency
+		}
+		if err := validateCompensation(minV, maxV, currency); err != nil {
+			return err
+		}
+	}
 	if ev.TechTags != nil {
 		if err := validateTags("tech_tag", *ev.TechTags); err != nil {
 			return err
@@ -158,6 +178,9 @@ func hasAnyEditField(ev events.JobEdited) bool {
 		ev.TechTags != nil ||
 		ev.CustomTags != nil ||
 		ev.Priority != nil ||
+		ev.CompMin != nil ||
+		ev.CompMax != nil ||
+		ev.CompCurrency != nil ||
 		ev.ExpectedComp != nil ||
 		ev.Description != nil
 }

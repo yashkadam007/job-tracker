@@ -159,6 +159,9 @@ type JobEdited struct {
 	TechTags     *[]string `json:"tech_tags,omitempty"`
 	CustomTags   *[]string `json:"custom_tags,omitempty"`
 	Priority     *int      `json:"priority,omitempty"`
+	CompMin      *float64  `json:"comp_min,omitempty"`
+	CompMax      *float64  `json:"comp_max,omitempty"`
+	CompCurrency *string   `json:"comp_currency,omitempty"`
 	ExpectedComp *float64  `json:"expected_comp,omitempty"`
 	Description  *string   `json:"description,omitempty"`
 }

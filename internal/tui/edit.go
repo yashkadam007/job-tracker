@@ -54,6 +54,10 @@ var editFields = []editField{
 	{key: "tech_tags", label: "tech tags", kind: editKindTags},
 	{key: "custom_tags", label: "custom tags", kind: editKindTags},
 	{key: "priority", label: "priority", kind: editKindNumber},
+	{key: "comp_min", label: "comp min", kind: editKindNumber},
+	{key: "comp_max", label: "comp max", kind: editKindNumber},
+	{key: "comp_currency", label: "comp currency", kind: editKindEnum,
+		options: []string{"(unset)", "INR", "USD", "EUR", "AUD"}},
 	{key: "expected_comp", label: "expected comp", kind: editKindNumber},
 	{key: "description", label: "description", kind: editKindDescription},
 	{key: "note", label: "+ new note", kind: editKindNote},
@@ -76,6 +80,9 @@ func (m *Model) enterEditMode(job jobclient.Job) {
 	m.editTechTags = nil
 	m.editCustomTags = nil
 	m.editPriority = nil
+	m.editCompMin = nil
+	m.editCompMax = nil
+	m.editCompCurrency = nil
 	m.editExpectedComp = nil
 	m.editDescription = nil
 	m.editNote = ""
@@ -326,6 +333,33 @@ func (m Model) currentFieldString(f editField) string {
 			return strconv.FormatFloat(*m.editJob.ExpectedComp, 'f', -1, 64)
 		}
 		return ""
+	case "comp_min":
+		if m.editCompMin != nil {
+			if *m.editCompMin == 0 {
+				return ""
+			}
+			return strconv.FormatFloat(*m.editCompMin, 'f', -1, 64)
+		}
+		if m.editJob.CompMin != nil {
+			return strconv.FormatFloat(*m.editJob.CompMin, 'f', -1, 64)
+		}
+		return ""
+	case "comp_max":
+		if m.editCompMax != nil {
+			if *m.editCompMax == 0 {
+				return ""
+			}
+			return strconv.FormatFloat(*m.editCompMax, 'f', -1, 64)
+		}
+		if m.editJob.CompMax != nil {
+			return strconv.FormatFloat(*m.editJob.CompMax, 'f', -1, 64)
+		}
+		return ""
+	case "comp_currency":
+		if m.editCompCurrency != nil {
+			return *m.editCompCurrency
+		}
+		return m.editJob.CompCurrency
 	case "description":
 		return firstLineSnippet(m.currentDescription(), 80)
 	case "note":
@@ -369,6 +403,12 @@ func (m *Model) commitEnum(f editField) {
 			v = events.Source(chosen)
 		}
 		m.editSource = &v
+	case "comp_currency":
+		var v string
+		if chosen != "(unset)" {
+			v = chosen
+		}
+		m.editCompCurrency = &v
 	}
 }
 
@@ -418,6 +458,34 @@ func (m *Model) commitTextField(f editField, val string) error {
 			return fmt.Errorf("expected_comp: must be > 0, got %v", v)
 		}
 		m.editExpectedComp = &v
+	case "comp_min":
+		if val == "" {
+			z := 0.0
+			m.editCompMin = &z
+			return nil
+		}
+		v, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return fmt.Errorf("comp_min: expected number, got %q", val)
+		}
+		if v < 0 {
+			return fmt.Errorf("comp_min: must be >= 0, got %v", v)
+		}
+		m.editCompMin = &v
+	case "comp_max":
+		if val == "" {
+			z := 0.0
+			m.editCompMax = &z
+			return nil
+		}
+		v, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return fmt.Errorf("comp_max: expected number, got %q", val)
+		}
+		if v < 0 {
+			return fmt.Errorf("comp_max: must be >= 0, got %v", v)
+		}
+		m.editCompMax = &v
 	case "tech_tags":
 		ts := splitTags(val)
 		m.editTechTags = &ts
@@ -462,6 +530,9 @@ func (m Model) publishEdit() (tea.Model, tea.Cmd) {
 		TechTags:     m.editTechTags,
 		CustomTags:   m.editCustomTags,
 		Priority:     m.editPriority,
+		CompMin:      m.editCompMin,
+		CompMax:      m.editCompMax,
+		CompCurrency: m.editCompCurrency,
 		ExpectedComp: m.editExpectedComp,
 		Description:  m.editDescription,
 	}
@@ -487,6 +558,9 @@ func hasStagedEdit(ev events.JobEdited) bool {
 		ev.TechTags != nil ||
 		ev.CustomTags != nil ||
 		ev.Priority != nil ||
+		ev.CompMin != nil ||
+		ev.CompMax != nil ||
+		ev.CompCurrency != nil ||
 		ev.ExpectedComp != nil ||
 		ev.Description != nil
 }
@@ -587,6 +661,12 @@ func (m Model) fieldStaged(key string) bool {
 		return m.editPriority != nil
 	case "expected_comp":
 		return m.editExpectedComp != nil
+	case "comp_min":
+		return m.editCompMin != nil
+	case "comp_max":
+		return m.editCompMax != nil
+	case "comp_currency":
+		return m.editCompCurrency != nil
 	case "description":
 		return m.editDescription != nil
 	case "note":

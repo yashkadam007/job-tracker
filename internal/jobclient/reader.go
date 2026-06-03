@@ -177,6 +177,33 @@ func (r *Reader) ListCompanies(ctx context.Context) ([]Company, error) {
 	return out, rows.Err()
 }
 
+// ListTitles returns the distinct set of job titles already in `jobs`,
+// ordered alphabetically. Drives the TUI new-job title autocomplete —
+// same shape as ListCompanies but sourced from the jobs table since
+// titles aren't a first-class entity.
+func (r *Reader) ListTitles(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+        SELECT DISTINCT title
+          FROM jobs
+         WHERE title <> ''
+      ORDER BY title
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // scannable is satisfied by both *pgx.Rows iterators and single-row
 // QueryRow results — both expose Scan(...).
 type scannable interface {

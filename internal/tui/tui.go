@@ -113,6 +113,13 @@ type Model struct {
 	companyMatched    []jobclient.Company
 	companyPick       int
 
+	// Title autocomplete state for stepTitle. Sourced from distinct
+	// jobs.title values rather than a first-class entity. Same filter +
+	// cycle semantics as the company autocomplete.
+	titles       []string
+	titleMatched []string
+	titlePick    int
+
 	// search
 	search     textinput.Model
 	searchTerm string
@@ -142,6 +149,9 @@ type Model struct {
 	editTechTags     *[]string
 	editCustomTags   *[]string
 	editPriority     *int
+	editCompMin      *float64
+	editCompMax      *float64
+	editCompCurrency *string
 	editExpectedComp *float64
 	editDescription  *string
 	editTextarea     textarea.Model
@@ -366,6 +376,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case titlesLoadedMsg:
+		if msg.err == nil {
+			m.titles = msg.titles
+			m.recomputeTitleMatches()
+		}
+		return m, nil
+
 	case skipCountsLoadedMsg:
 		m.statusLoading = false
 		m.statusResults = msg.results
@@ -412,7 +429,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newInput.Focus()
 		m.companyMatched = nil
 		m.companyPick = 0
-		return m, tea.Batch(textinput.Blink, listCompaniesCmd(m.cfg.Reader))
+		m.titleMatched = nil
+		m.titlePick = 0
+		return m, tea.Batch(
+			textinput.Blink,
+			listCompaniesCmd(m.cfg.Reader),
+			listTitlesCmd(m.cfg.Reader),
+		)
 	case "/":
 		m.mode = modeSearch
 		m.search.Focus()
@@ -504,17 +527,22 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newErr = ""
 		return m, nil
 	case "tab", "shift+tab":
-		// Tab/Shift+Tab cycles the company autocomplete (ADR 0010).
-		// Picking a suggestion fills the input with the canonical
-		// company name; Enter then submits that exact string. Only
-		// active on stepCompany.
-		if m.newStep == stepCompany && len(m.companyMatched) > 0 {
-			delta := 1
-			if msg.String() == "shift+tab" {
-				delta = -1
-			}
+		// Tab/Shift+Tab cycles the autocomplete on stepTitle and
+		// stepCompany. Picking a suggestion fills the input with the
+		// canonical value; Enter then advances/submits that string.
+		delta := 1
+		if msg.String() == "shift+tab" {
+			delta = -1
+		}
+		switch {
+		case m.newStep == stepCompany && len(m.companyMatched) > 0:
 			m.companyPick = (m.companyPick + delta + len(m.companyMatched)) % len(m.companyMatched)
 			m.newInput.SetValue(m.companyMatched[m.companyPick].Name)
+			m.newInput.CursorEnd()
+			return m, nil
+		case m.newStep == stepTitle && len(m.titleMatched) > 0:
+			m.titlePick = (m.titlePick + delta + len(m.titleMatched)) % len(m.titleMatched)
+			m.newInput.SetValue(m.titleMatched[m.titlePick])
 			m.newInput.CursorEnd()
 			return m, nil
 		}
@@ -529,6 +557,7 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newStep = stepTitle
 			m.newInput.SetValue(m.newTitle)
 			m.newInput.Placeholder = "Senior Software Engineer"
+			m.recomputeTitleMatches()
 			return m, nil
 		case stepTitle:
 			m.newTitle = val
@@ -547,8 +576,11 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.newInput, cmd = m.newInput.Update(msg)
-	if m.newStep == stepCompany {
+	switch m.newStep {
+	case stepCompany:
 		m.recomputeCompanyMatches()
+	case stepTitle:
+		m.recomputeTitleMatches()
 	}
 	return m, cmd
 }
@@ -574,6 +606,27 @@ func (m *Model) recomputeCompanyMatches() {
 		}
 	}
 	m.companyPick = 0
+}
+
+// recomputeTitleMatches filters the loaded titles list against the
+// current stepTitle input. Same shape as recomputeCompanyMatches.
+func (m *Model) recomputeTitleMatches() {
+	const maxSuggestions = 8
+	q := strings.ToLower(strings.TrimSpace(m.newInput.Value()))
+	m.titleMatched = m.titleMatched[:0]
+	if q == "" {
+		m.titlePick = 0
+		return
+	}
+	for _, t := range m.titles {
+		if strings.Contains(strings.ToLower(t), q) {
+			m.titleMatched = append(m.titleMatched, t)
+			if len(m.titleMatched) >= maxSuggestions {
+				break
+			}
+		}
+	}
+	m.titlePick = 0
 }
 
 // stepForValidationError maps a producer-side validation sentinel back
@@ -1089,13 +1142,37 @@ func (m Model) viewNew() string {
 	}
 	help := "enter=next  esc=cancel"
 	suggestions := ""
-	if m.newStep == stepCompany {
+	switch m.newStep {
+	case stepTitle:
+		if len(m.titleMatched) > 0 {
+			help = "enter=next  tab=cycle  esc=cancel"
+		}
+		suggestions = m.viewTitleSuggestions()
+	case stepCompany:
 		help = "enter=submit  tab=cycle  esc=cancel"
 		suggestions = m.viewCompanySuggestions()
 	}
 	body := banner + titleStyle.Render(label) + "\n\n" + m.newInput.View() + suggestions + "\n\n" +
 		helpStyle.Render(help)
 	return modalBox.Render(body)
+}
+
+// viewTitleSuggestions renders the matched-titles list under the
+// stepTitle input. Same layout as viewCompanySuggestions.
+func (m Model) viewTitleSuggestions() string {
+	if len(m.titleMatched) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, t := range m.titleMatched {
+		b.WriteString("\n")
+		if i == m.titlePick {
+			b.WriteString(gutterStyle.Render("▌") + " " + t)
+		} else {
+			b.WriteString("  " + t)
+		}
+	}
+	return b.String()
 }
 
 // viewCompanySuggestions renders the matched-companies list under the

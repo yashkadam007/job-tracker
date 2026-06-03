@@ -59,6 +59,11 @@ type companiesLoadedMsg struct {
 	err       error
 }
 
+type titlesLoadedMsg struct {
+	titles []string
+	err    error
+}
+
 type errMsg struct{ err error }
 
 // clearErrMsg is delivered on a timer to clear a transient error.
@@ -159,6 +164,18 @@ func listCompaniesCmd(reader *jobclient.Reader) tea.Cmd {
 	}
 }
 
+// listTitlesCmd loads distinct job titles for the new-job modal's
+// stepTitle autocomplete. Mirrors listCompaniesCmd; fired once on
+// modeNew entry.
+func listTitlesCmd(reader *jobclient.Reader) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ts, err := reader.ListTitles(ctx)
+		return titlesLoadedMsg{titles: ts, err: err}
+	}
+}
+
 // changeStatusCmd publishes job.status.changed. The Store consumer may
 // reject an invalid transition; that surfaces as a different status on
 // the next List, not as an error here.
@@ -205,7 +222,9 @@ func editJobAndNoteCmd(pub *jobclient.Publisher, ev events.JobEdited, note strin
 	ev.EditedAt = time.Now().UTC()
 	hasEdit := ev.URL != nil || ev.Title != nil || ev.WorkMode != nil ||
 		ev.Location != nil || ev.Source != nil || ev.TechTags != nil ||
-		ev.CustomTags != nil || ev.Priority != nil || ev.ExpectedComp != nil
+		ev.CustomTags != nil || ev.Priority != nil || ev.ExpectedComp != nil ||
+		ev.CompMin != nil || ev.CompMax != nil || ev.CompCurrency != nil ||
+		ev.Description != nil
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
