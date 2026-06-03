@@ -757,8 +757,14 @@ func (m *Model) applyFilter() {
 		// Status is plain text in the list (coloured in the detail
 		// panel). Mixing ANSI escapes with bubbles/table column
 		// truncation produced the title-column bleed.
+		// Action-needed statuses get a "▶ " prefix so they stand out
+		// without ANSI codes.
+		statusCell := "  " + string(j.Status)
+		if j.Status == events.StatusSaved || j.Status == events.StatusAssessment {
+			statusCell = "▶ " + string(j.Status)
+		}
 		rows = append(rows, table.Row{
-			padRight(string(j.Status), 10),
+			statusCell,
 			truncate(j.Title, 60),
 			truncate(j.Company, 30),
 			fmtWhen(j.LastEventAt),
