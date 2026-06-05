@@ -96,6 +96,32 @@ func (r *Reader) List(ctx context.Context, f ListFilter) ([]Job, error) {
 	return out, rows.Err()
 }
 
+// StatusCounts returns the number of jobs currently in each status. It
+// intentionally has no filter: dashboard/funnel summaries should remain
+// global even when a caller's list view is narrowed.
+func (r *Reader) StatusCounts(ctx context.Context) (map[events.JobStatus]int, error) {
+	rows, err := r.pool.Query(ctx, `
+        SELECT status, count(*)
+          FROM jobs
+      GROUP BY status
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[events.JobStatus]int)
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		out[events.JobStatus(status)] = int(count)
+	}
+	return out, rows.Err()
+}
+
 // Get returns the job whose url matches. Returns ErrNotFound when no
 // row exists.
 func (r *Reader) Get(ctx context.Context, url string) (Job, error) {

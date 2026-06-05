@@ -5,9 +5,9 @@
 //
 // Architecture (one parent Model):
 //
-//   list view    — bubbles/table of jobs with status pill + search box
-//   detail view  — selected job's metadata + pending reminder
-//   new modal    — three-step prompt (URL → title → company) on `n`
+//	list view    — bubbles/table of jobs with status pill + search box
+//	detail view  — selected job's metadata + pending reminder
+//	new modal    — three-step prompt (URL → title → company) on `n`
 //
 // All async work is wrapped in tea.Cmds (see cmds.go) so a slow tailnet
 // never blocks the UI.
@@ -32,7 +32,6 @@ import (
 	"job-tracker/internal/events"
 	"job-tracker/internal/jobclient"
 )
-
 
 // Config bundles wired dependencies. Build in main(), pass to New.
 type Config struct {
@@ -109,9 +108,9 @@ type Model struct {
 	// is the full server snapshot loaded once on modeNew entry; matched
 	// is the case-insensitive substring filter against the current
 	// textinput value; companyPick is the index into matched.
-	companies         []jobclient.Company
-	companyMatched    []jobclient.Company
-	companyPick       int
+	companies      []jobclient.Company
+	companyMatched []jobclient.Company
+	companyPick    int
 
 	// Title autocomplete state for stepTitle. Sourced from distinct
 	// jobs.title values rather than a first-class entity. Same filter +
@@ -123,6 +122,12 @@ type Model struct {
 	// search
 	search     textinput.Model
 	searchTerm string
+
+	// stats bar. Counts are global across the database, independent of
+	// the current table status filter or local search.
+	statsCounts  map[events.JobStatus]int
+	statsLoading bool
+	statsErr     string
 
 	// status panel (ADR 0006). Lazy-fetched on entry to modeStatus.
 	statusLoading bool
@@ -198,11 +203,12 @@ func New(cfg Config) Model {
 	si.Prompt = "/ "
 
 	return Model{
-		cfg:      cfg,
-		tbl:      tbl,
-		newInput: ni,
-		search:   si,
-		loading:  true,
+		cfg:          cfg,
+		tbl:          tbl,
+		newInput:     ni,
+		search:       si,
+		loading:      true,
+		statsLoading: true,
 	}
 }
 
@@ -250,6 +256,7 @@ func padRight(s string, n int) string {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		listJobsCmd(m.cfg.Reader, m.statusFilter),
+		loadStatsCmd(m.cfg.Reader),
 		listenJobsChangedCmd(m.cfg.Pool, nil),
 	)
 }
@@ -277,11 +284,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyFilter()
 		return m, nil
 
+	case statsLoadedMsg:
+		m.statsLoading = false
+		if msg.err != nil {
+			m.statsErr = msg.err.Error()
+			return m, nil
+		}
+		m.statsErr = ""
+		m.statsCounts = normalizeStats(msg.counts)
+		return m, nil
+
 	case statusChangedMsg:
 		if msg.err != nil {
 			m.err = "status change: " + msg.err.Error()
 			return m, tea.Batch(
 				listJobsCmd(m.cfg.Reader, m.statusFilter),
+				loadStatsCmd(m.cfg.Reader),
 				clearErrAfter(15*time.Second),
 			)
 		}
@@ -357,15 +375,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// short backoff. The conn was released inside the cmd.
 			m.listenConn = nil
 			m.err = "listen: " + msg.err.Error()
+			m.statsLoading = len(m.statsCounts) == 0
 			return m, tea.Batch(
 				listJobsCmd(m.cfg.Reader, m.statusFilter),
+				loadStatsCmd(m.cfg.Reader),
 				clearErrAfter(15*time.Second),
 				reconnectListenAfter(time.Second),
 			)
 		}
 		m.listenConn = msg.conn
+		m.statsLoading = len(m.statsCounts) == 0
 		return m, tea.Batch(
 			listJobsCmd(m.cfg.Reader, m.statusFilter),
+			loadStatsCmd(m.cfg.Reader),
 			listenJobsChangedCmd(m.cfg.Pool, m.listenConn),
 		)
 
@@ -729,8 +751,27 @@ func (m Model) applyStatus(s events.JobStatus) (tea.Model, tea.Cmd) {
 			break
 		}
 	}
+	m.updateStatsOptimistic(job.Status, s)
 	m.applyFilter()
 	return m, changeStatusCmd(m.cfg.Publisher, job.JobID, s)
+}
+
+func normalizeStats(counts map[events.JobStatus]int) map[events.JobStatus]int {
+	out := make(map[events.JobStatus]int, len(events.AllowedStatuses))
+	for _, status := range events.AllowedStatuses {
+		out[status] = counts[status]
+	}
+	return out
+}
+
+func (m *Model) updateStatsOptimistic(from, to events.JobStatus) {
+	if m.statsCounts == nil || from == to {
+		return
+	}
+	if m.statsCounts[from] > 0 {
+		m.statsCounts[from]--
+	}
+	m.statsCounts[to]++
 }
 
 // selectedJob returns the job under the cursor, if any. The table's
@@ -781,9 +822,10 @@ func (m *Model) applyFilter() {
 
 // setTableHeight shrinks the table to the row count when rows fit, so a
 // small result set doesn't strand the detail panel at the bottom of the
-// terminal. Reserves 15 rows for the surrounding chrome (title, pill,
-// three rules, detail block, two-line help, error line) — the help row
-// gained a second line in ADR 0013 when A/D keybinds landed.
+// terminal. Reserves 16 rows for the surrounding chrome (title, pill,
+// stats bar, three rules, detail block, two-line help, error line) —
+// the help row gained a second line in ADR 0013 when A/D keybinds
+// landed.
 //
 // SetHeight in bubbles/table v1.0.0 sets viewport.Height to
 // (h - headersView.Height). Our header has a bottom border, so its
@@ -794,7 +836,7 @@ func (m *Model) setTableHeight() {
 		return
 	}
 	const headerH = 2
-	maxH := m.height - 15
+	maxH := m.height - 16
 	if maxH < headerH+1 {
 		maxH = headerH + 1
 	}
@@ -882,6 +924,8 @@ func (m Model) View() string {
 	top.WriteString(" " + titleStyle.Render("jobtracker — desktop triage"))
 	top.WriteString("\n")
 	top.WriteString(m.pill())
+	top.WriteString("\n")
+	top.WriteString(m.statsBar())
 	top.WriteString("\n")
 	top.WriteString(rule)
 	top.WriteString("\n")
@@ -971,6 +1015,64 @@ func (m Model) pill() string {
 		suffix = helpStyle.Render("loading…")
 	}
 	return " " + pill + "  " + suffix
+}
+
+func (m Model) statsBar() string {
+	switch {
+	case len(m.statsCounts) > 0:
+		row := m.statsRow()
+		if m.width > 0 && lipgloss.Width(row) > m.width-1 {
+			row = m.compactStatsRow()
+		}
+		return " " + row
+	case m.statsLoading:
+		return " " + helpStyle.Render("stats: loading...")
+	case m.statsErr != "":
+		return " " + errStyle.Render("stats unavailable")
+	default:
+		return " " + helpStyle.Render("stats unavailable")
+	}
+}
+
+func (m Model) statsRow() string {
+	parts := []string{
+		m.statsSegment(events.StatusSaved),
+		m.statsSegment(events.StatusApplied),
+		helpStyle.Render("->"),
+		m.statsSegment(events.StatusAssessment),
+		helpStyle.Render("->"),
+		m.statsSegment(events.StatusInterview),
+		helpStyle.Render("->"),
+		m.statsSegment(events.StatusOffer),
+		m.statsSegment(events.StatusRejected),
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m Model) compactStatsRow() string {
+	parts := []string{
+		m.compactStatsSegment("S", events.StatusSaved),
+		m.compactStatsSegment("A", events.StatusApplied),
+		helpStyle.Render(">"),
+		m.compactStatsSegment("As", events.StatusAssessment),
+		helpStyle.Render(">"),
+		m.compactStatsSegment("I", events.StatusInterview),
+		helpStyle.Render(">"),
+		m.compactStatsSegment("O", events.StatusOffer),
+		m.compactStatsSegment("R", events.StatusRejected),
+	}
+	return strings.Join(parts, " ")
+}
+
+func (m Model) statsSegment(status events.JobStatus) string {
+	return styleStatus(string(status)) + " " + helpStyle.Render(strconv.Itoa(m.statsCounts[status]))
+}
+
+func (m Model) compactStatsSegment(label string, status events.JobStatus) string {
+	if st, ok := statusStyles[string(status)]; ok {
+		label = st.Render(label)
+	}
+	return label + helpStyle.Render(strconv.Itoa(m.statsCounts[status]))
 }
 
 func (m Model) viewDetail() string {

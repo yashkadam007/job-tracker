@@ -29,6 +29,11 @@ type jobsLoadedMsg struct {
 	err  error
 }
 
+type statsLoadedMsg struct {
+	counts map[events.JobStatus]int
+	err    error
+}
+
 type statusChangedMsg struct {
 	jobID  string
 	status events.JobStatus
@@ -149,6 +154,17 @@ func listJobsCmd(reader *jobclient.Reader, statusFilter *events.JobStatus) tea.C
 			OrderBy: "last_event_at",
 		})
 		return jobsLoadedMsg{jobs: jobs, err: err}
+	}
+}
+
+// loadStatsCmd re-queries global status counts for the header stats bar.
+// It deliberately ignores the active table filter/search.
+func loadStatsCmd(reader *jobclient.Reader) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		counts, err := reader.StatusCounts(ctx)
+		return statsLoadedMsg{counts: counts, err: err}
 	}
 }
 
