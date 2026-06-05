@@ -189,8 +189,68 @@ func TestApplyFilterUsesRelativeLastEventInTableRows(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
-	if got := rows[0][3]; got != "4d ago" {
+	if got := rows[0][4]; got != "4d ago" {
 		t.Fatalf("last event cell = %q, want %q", got, "4d ago")
+	}
+}
+
+func TestApplyFilterMatchesCustomAndTechTags(t *testing.T) {
+	m := New(Config{})
+	alpha := testJob("1", "Alpha Backend", events.StatusSaved)
+	alpha.CustomTags = []string{"custom-resume", "startup"}
+	beta := testJob("2", "Beta Backend", events.StatusSaved)
+	beta.TechTags = []string{"kafka"}
+	m.jobs = []jobclient.Job{alpha, beta}
+
+	m.searchTerm = "custom-resume"
+	m.applyFilter()
+	if len(m.view) != 1 || m.view[0].JobID != "1" {
+		t.Fatalf("custom tag search matched %#v, want job 1", m.view)
+	}
+
+	m.searchTerm = "kafka"
+	m.applyFilter()
+	if len(m.view) != 1 || m.view[0].JobID != "2" {
+		t.Fatalf("tech tag search matched %#v, want job 2", m.view)
+	}
+}
+
+func TestApplyFilterRendersCustomTagsColumn(t *testing.T) {
+	m := New(Config{})
+	m.tbl.SetColumns(defaultColumns(120))
+	job := testJob("1", "Alpha Backend", events.StatusSaved)
+	job.CustomTags = []string{"referral", "custom-resume"}
+	m.jobs = []jobclient.Job{job}
+
+	m.applyFilter()
+
+	rows := m.tbl.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	got := rows[0][3]
+	for _, want := range []string{"[referral]", "[custom-resume]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("tags cell = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestTableViewColorizesTagBadgesOnUnselectedRows(t *testing.T) {
+	m := New(Config{})
+	first := testJob("1", "Alpha Backend", events.StatusSaved)
+	second := testJob("2", "Beta Backend", events.StatusSaved)
+	second.CustomTags = []string{"referral"}
+	m.jobs = []jobclient.Job{first, second}
+	m.applyFilter()
+	m.tbl.SetCursor(0)
+
+	got := m.tableView()
+	if !strings.Contains(stripANSI(got), "[referral]") {
+		t.Fatalf("table view missing plain referral badge after stripping ANSI: %q", stripANSI(got))
+	}
+	if !strings.Contains(got, renderTagBadge("referral")) {
+		t.Fatalf("table view missing rendered referral badge: %q", got)
 	}
 }
 

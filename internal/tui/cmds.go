@@ -210,7 +210,7 @@ func changeStatusCmd(pub *jobclient.Publisher, jobID string, status events.JobSt
 }
 
 // submitCmd publishes job.submitted for a brand-new job.
-func submitCmd(pub *jobclient.Publisher, url, title, company string) tea.Cmd {
+func submitCmd(pub *jobclient.Publisher, url, title, company string, customTags []string) tea.Cmd {
 	ev := events.JobSubmitted{
 		EventID:     uuid.NewString(),
 		JobID:       uuid.NewString(),
@@ -219,6 +219,7 @@ func submitCmd(pub *jobclient.Publisher, url, title, company string) tea.Cmd {
 		Company:     company,
 		Status:      events.StatusSaved,
 		SubmittedAt: time.Now().UTC(),
+		CustomTags:  customTags,
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

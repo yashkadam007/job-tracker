@@ -86,6 +86,8 @@ func (m *Model) enterEditMode(job jobclient.Job) {
 	m.editExpectedComp = nil
 	m.editDescription = nil
 	m.editNote = ""
+	m.tagMatched = nil
+	m.tagPick = 0
 }
 
 // handleEditKey routes keystrokes while the edit modal is open.
@@ -124,6 +126,9 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editInput = newEditInput(m.currentFieldString(f))
 			m.editInput.Focus()
+			if f.key == "custom_tags" {
+				m.recomputeTagMatches()
+			}
 			return m, textinput.Blink
 		}
 	}
@@ -229,6 +234,17 @@ func (m Model) handleEditFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editing = false
 		m.editInput.Blur()
 		return m, nil
+	case "tab", "shift+tab":
+		if f.key == "custom_tags" && len(m.tagMatched) > 0 {
+			delta := 1
+			if msg.String() == "shift+tab" {
+				delta = -1
+			}
+			m.tagPick = (m.tagPick + delta + len(m.tagMatched)) % len(m.tagMatched)
+			m.editInput.SetValue(replaceCurrentTagToken(m.editInput.Value(), m.tagMatched[m.tagPick]))
+			m.editInput.CursorEnd()
+			return m, nil
+		}
 	case "enter":
 		val := strings.TrimSpace(m.editInput.Value())
 		if err := m.commitTextField(f, val); err != nil {
@@ -242,6 +258,9 @@ func (m Model) handleEditFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.editInput, cmd = m.editInput.Update(msg)
+	if f.key == "custom_tags" {
+		m.recomputeTagMatches()
+	}
 	return m, cmd
 }
 
@@ -594,6 +613,12 @@ func (m Model) viewEdit() string {
 		f := editFields[m.editCursor]
 		if f.kind == editKindEnum {
 			b.WriteString(helpStyle.Render("←/→ cycle  enter=accept  esc=back"))
+		} else if f.key == "custom_tags" {
+			if suggestions := m.viewTagSuggestions(); suggestions != "" {
+				b.WriteString(suggestions)
+				b.WriteString("\n")
+			}
+			b.WriteString(helpStyle.Render("enter=accept  tab=cycle  esc=back"))
 		} else {
 			b.WriteString(helpStyle.Render("enter=accept  esc=back"))
 		}

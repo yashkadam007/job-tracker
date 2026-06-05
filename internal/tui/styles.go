@@ -51,3 +51,33 @@ func styleStatus(s string) string {
 	}
 	return s
 }
+
+var tagBadgeBackgrounds = []lipgloss.Color{
+	lipgloss.Color("24"),
+	lipgloss.Color("29"),
+	lipgloss.Color("53"),
+	lipgloss.Color("58"),
+	lipgloss.Color("60"),
+	lipgloss.Color("88"),
+	lipgloss.Color("94"),
+	lipgloss.Color("96"),
+}
+
+func renderTagBadge(tag string) string {
+	bg := tagBadgeBackgrounds[tagColorIndex(tag)]
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("231")).
+		Background(bg).
+		Render("[" + tag + "]")
+}
+
+func tagColorIndex(tag string) int {
+	if len(tagBadgeBackgrounds) == 0 {
+		return 0
+	}
+	sum := 0
+	for _, r := range tag {
+		sum = (sum*31 + int(r)) % len(tagBadgeBackgrounds)
+	}
+	return sum
+}

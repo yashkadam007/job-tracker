@@ -7,7 +7,7 @@
 //
 //	list view    — bubbles/table of jobs with status pill + search box
 //	detail view  — selected job's metadata + pending reminder
-//	new modal    — three-step prompt (URL → title → company) on `n`
+//	new modal    — prompt (URL → title → company → custom tags) on `n`
 //
 // All async work is wrapped in tea.Cmds (see cmds.go) so a slow tailnet
 // never blocks the UI.
@@ -74,6 +74,7 @@ const (
 	stepURL newStep = iota
 	stepTitle
 	stepCompany
+	stepCustomTags
 )
 
 // Model is the parent Bubble Tea model. Holds the full job set in
@@ -95,11 +96,12 @@ type Model struct {
 	// new-job modal. Field values persist across a submit so a
 	// validation failure can reopen the form with the same input and
 	// focus the offending step.
-	newStep    newStep
-	newInput   textinput.Model
-	newURL     string
-	newTitle   string
-	newCompany string
+	newStep       newStep
+	newInput      textinput.Model
+	newURL        string
+	newTitle      string
+	newCompany    string
+	newCustomTags []string
 	// newErr is the producer-side validation message, rendered as a
 	// red banner above the form. Sticky — cleared on next successful
 	// submit, modal-close, or modal-open.
@@ -119,6 +121,12 @@ type Model struct {
 	titles       []string
 	titleMatched []string
 	titlePick    int
+
+	// Tag autocomplete state for comma-separated custom-tag inputs.
+	// Suggestions are derived from the loaded job snapshot, not a
+	// registry table. tagPick is the index into tagMatched.
+	tagMatched []string
+	tagPick    int
 
 	// search
 	search     textinput.Model
@@ -221,12 +229,16 @@ const statusColW = 12
 var nowForLastEvent = time.Now
 
 func defaultColumns(width int) []table.Column {
-	// status • title • company • last_event
+	// status • title • company • tags • last_event
 	// lastW = 10 fits the "last event" header and compact relative dates.
 	// Reserve 2 chars on the left for the gutter overlay added in tableView.
 	statusW := statusColW
 	lastW := 10
-	rest := width - statusW - lastW - 6 - 2
+	tagsW := 26
+	if width < 100 {
+		tagsW = 18
+	}
+	rest := width - statusW - tagsW - lastW - 8 - 2
 	if rest < 30 {
 		rest = 30
 	}
@@ -236,6 +248,7 @@ func defaultColumns(width int) []table.Column {
 		{Title: "status", Width: statusW},
 		{Title: "title", Width: titleW},
 		{Title: "company", Width: companyW},
+		{Title: "tags", Width: tagsW},
 		{Title: "last event", Width: lastW},
 	}
 }
@@ -369,6 +382,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// starts clean. The row appears when LISTEN jobs_changed fires
 		// from the Store consumer's apply tx (ADR 0012).
 		m.newURL, m.newTitle, m.newCompany, m.newErr = "", "", "", ""
+		m.newCustomTags = nil
 		return m, nil
 
 	case editedMsg:
@@ -483,6 +497,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newURL = ""
 		m.newTitle = ""
 		m.newCompany = ""
+		m.newCustomTags = nil
 		m.newErr = ""
 		m.newInput.SetValue("")
 		m.newInput.Placeholder = "https://…"
@@ -491,6 +506,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.companyPick = 0
 		m.titleMatched = nil
 		m.titlePick = 0
+		m.tagMatched = nil
+		m.tagPick = 0
 		return m, tea.Batch(
 			textinput.Blink,
 			listCompaniesCmd(m.cfg.Reader),
@@ -605,10 +622,15 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newInput.SetValue(m.titleMatched[m.titlePick])
 			m.newInput.CursorEnd()
 			return m, nil
+		case m.newStep == stepCustomTags && len(m.tagMatched) > 0:
+			m.tagPick = (m.tagPick + delta + len(m.tagMatched)) % len(m.tagMatched)
+			m.newInput.SetValue(replaceCurrentTagToken(m.newInput.Value(), m.tagMatched[m.tagPick]))
+			m.newInput.CursorEnd()
+			return m, nil
 		}
 	case "enter":
 		val := strings.TrimSpace(m.newInput.Value())
-		if val == "" {
+		if val == "" && m.newStep != stepCustomTags {
 			return m, nil
 		}
 		switch m.newStep {
@@ -628,7 +650,14 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case stepCompany:
 			m.newCompany = val
-			cmd := submitCmd(m.cfg.Publisher, m.newURL, m.newTitle, m.newCompany)
+			m.newStep = stepCustomTags
+			m.newInput.SetValue(strings.Join(m.newCustomTags, ", "))
+			m.newInput.Placeholder = "referral, custom-resume, startup"
+			m.recomputeTagMatches()
+			return m, nil
+		case stepCustomTags:
+			m.newCustomTags = splitTags(val)
+			cmd := submitCmd(m.cfg.Publisher, m.newURL, m.newTitle, m.newCompany, m.newCustomTags)
 			m.mode = modeList
 			m.newInput.Blur()
 			return m, cmd
@@ -641,6 +670,8 @@ func (m Model) handleNewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.recomputeCompanyMatches()
 	case stepTitle:
 		m.recomputeTitleMatches()
+	case stepCustomTags:
+		m.recomputeTagMatches()
 	}
 	return m, cmd
 }
@@ -689,6 +720,83 @@ func (m *Model) recomputeTitleMatches() {
 	m.titlePick = 0
 }
 
+// recomputeTagMatches filters the known custom tag set against the
+// current comma-separated token. Suggestions are capped so modals stay
+// compact, and typing a brand-new tag remains valid.
+func (m *Model) recomputeTagMatches() {
+	const maxSuggestions = 8
+	q := currentTagToken(m.activeTagInputValue())
+	m.tagMatched = m.tagMatched[:0]
+	if q == "" {
+		m.tagPick = 0
+		return
+	}
+	q = strings.ToLower(q)
+	for _, tag := range m.knownCustomTags() {
+		if strings.Contains(strings.ToLower(tag), q) {
+			m.tagMatched = append(m.tagMatched, tag)
+			if len(m.tagMatched) >= maxSuggestions {
+				break
+			}
+		}
+	}
+	m.tagPick = 0
+}
+
+func (m Model) activeTagInputValue() string {
+	if m.mode == modeEdit && m.editing {
+		return m.editInput.Value()
+	}
+	return m.newInput.Value()
+}
+
+func (m Model) knownCustomTags() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, j := range m.jobs {
+		for _, tag := range j.CustomTags {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			key := strings.ToLower(tag)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, tag)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
+	return out
+}
+
+func currentTagToken(v string) string {
+	parts := strings.Split(v, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+func replaceCurrentTagToken(v, tag string) string {
+	parts := strings.Split(v, ",")
+	if len(parts) == 0 {
+		return tag
+	}
+	parts[len(parts)-1] = " " + tag
+	for i := range parts {
+		if i == 0 {
+			parts[i] = strings.TrimSpace(parts[i])
+			continue
+		}
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return strings.Join(parts, ", ")
+}
+
 // stepForValidationError maps a producer-side validation sentinel back
 // to the form field that produced it, so the modal can reopen with
 // focus on the offending step. Any unrecognised sentinel falls back to
@@ -702,6 +810,8 @@ func stepForValidationError(err error) newStep {
 		return stepTitle
 	case errors.Is(err, jobclient.ErrMissingCompany):
 		return stepCompany
+	case errors.Is(err, jobclient.ErrInvalidTag):
+		return stepCustomTags
 	}
 	return stepURL
 }
@@ -717,6 +827,8 @@ func currentStepValue(m *Model, s newStep) string {
 		return m.newTitle
 	case stepCompany:
 		return m.newCompany
+	case stepCustomTags:
+		return strings.Join(m.newCustomTags, ", ")
 	}
 	return ""
 }
@@ -846,6 +958,7 @@ func (m *Model) applyFilter() {
 			statusCell,
 			truncate(j.Title, 60),
 			truncate(j.Company, 30),
+			formatTagBadges(j.CustomTags, tagColumnWidth(m.tbl.Columns())),
 			fmtTableLastEvent(j.LastEventAt),
 		})
 	}
@@ -894,7 +1007,69 @@ func matchesSearch(j jobclient.Job, term string) bool {
 	if strings.Contains(strings.ToLower(j.URL), term) {
 		return true
 	}
+	for _, tag := range j.TechTags {
+		if strings.Contains(strings.ToLower(tag), term) {
+			return true
+		}
+	}
+	for _, tag := range j.CustomTags {
+		if strings.Contains(strings.ToLower(tag), term) {
+			return true
+		}
+	}
 	return false
+}
+
+func tagColumnWidth(cols []table.Column) int {
+	if len(cols) < 4 {
+		return 0
+	}
+	return cols[3].Width
+}
+
+func formatTagBadges(tags []string, width int) string {
+	if width <= 0 || len(tags) == 0 {
+		return ""
+	}
+	var parts []string
+	for i, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		candidate := "[" + tag + "]"
+		next := candidate
+		if len(parts) > 0 {
+			next = strings.Join(append(append([]string{}, parts...), candidate), " ")
+		}
+		if lipgloss.Width(next) <= width {
+			parts = append(parts, candidate)
+			continue
+		}
+		remaining := len(tags) - i
+		if len(parts) == 0 {
+			return truncate(candidate, width)
+		}
+		marker := "+" + strconv.Itoa(remaining)
+		withMarker := strings.Join(append(append([]string{}, parts...), marker), " ")
+		if lipgloss.Width(withMarker) <= width {
+			return withMarker
+		}
+		return strings.Join(parts, " ")
+	}
+	return strings.Join(parts, " ")
+}
+
+func colorizeTagBadges(line string, tags []string) string {
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		plain := "[" + tag + "]"
+		line = strings.ReplaceAll(line, plain, renderTagBadge(tag))
+	}
+	return line
 }
 
 func truncate(s string, n int) string {
@@ -1021,6 +1196,9 @@ func (m Model) tableView() string {
 				if len(lines[i]) >= statusColW {
 					lines[i] = st.Render(lines[i][:statusColW]) + lines[i][statusColW:]
 				}
+			}
+			if len(job.CustomTags) > 0 {
+				lines[i] = colorizeTagBadges(lines[i], job.CustomTags)
 			}
 		}
 		if i == selRow && i >= 0 && i < len(lines) {
@@ -1298,6 +1476,8 @@ func (m Model) viewNew() string {
 		label = fmt.Sprintf("new job — title  (url=%s)", truncate(m.newURL, 50))
 	case stepCompany:
 		label = fmt.Sprintf("new job — company  (%s)", truncate(m.newTitle, 50))
+	case stepCustomTags:
+		label = fmt.Sprintf("new job — custom tags  (%s)", truncate(m.newCompany, 50))
 	}
 	var banner string
 	if m.newErr != "" {
@@ -1312,8 +1492,11 @@ func (m Model) viewNew() string {
 		}
 		suggestions = m.viewTitleSuggestions()
 	case stepCompany:
-		help = "enter=submit  tab=cycle  esc=cancel"
+		help = "enter=next  tab=cycle  esc=cancel"
 		suggestions = m.viewCompanySuggestions()
+	case stepCustomTags:
+		help = "enter=submit  tab=cycle  esc=cancel"
+		suggestions = m.viewTagSuggestions()
 	}
 	body := banner + titleStyle.Render(label) + "\n\n" + m.newInput.View() + suggestions + "\n\n" +
 		helpStyle.Render(help)
@@ -1354,6 +1537,26 @@ func (m Model) viewCompanySuggestions() string {
 			b.WriteString(gutterStyle.Render("▌") + " " + c.Name)
 		} else {
 			b.WriteString("  " + c.Name)
+		}
+	}
+	return b.String()
+}
+
+// viewTagSuggestions renders custom-tag suggestions for comma-separated
+// tag inputs. The same state is used by the new-job tags step and the
+// edit modal's custom_tags field.
+func (m Model) viewTagSuggestions() string {
+	if len(m.tagMatched) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, tag := range m.tagMatched {
+		b.WriteString("\n")
+		rendered := renderTagBadge(tag)
+		if i == m.tagPick {
+			b.WriteString(gutterStyle.Render("▌") + " " + rendered)
+		} else {
+			b.WriteString("  " + rendered)
 		}
 	}
 	return b.String()
