@@ -798,9 +798,11 @@ step re-queries with the server-side filter on.
 **Reload (`shift-R`)** forces a fresh List in case something
 changed via the bot or CLI mid-session.
 
-**Quit (`q` / `ctrl+c`).** The Bubble Tea program exits, defers
-run, and the Publisher flushes its in-flight produces. Confirm
-no `producer close:` errors on stderr.
+**Quit (`q` / `ctrl+c`).** The Bubble Tea program exits, cancels the
+Postgres `LISTEN jobs_changed` wait, runs defers, and the Publisher
+flushes its in-flight produces. Confirm the shell prompt returns
+without needing a second `ctrl+c`, and confirm no `producer close:`
+errors on stderr.
 
 ### 10e. Cross-frontend coherence
 

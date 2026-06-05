@@ -6,8 +6,8 @@
 //
 // Config (env, namespaced because it lives in the user's shell rc):
 //
-//   JOB_TRACKER_DATABASE_URL    postgres DSN reachable over Tailscale/LAN
-//   JOB_TRACKER_KAFKA_BOOTSTRAP comma-separated bootstrap brokers
+//	JOB_TRACKER_DATABASE_URL    postgres DSN reachable over Tailscale/LAN
+//	JOB_TRACKER_KAFKA_BOOTSTRAP comma-separated bootstrap brokers
 package main
 
 import (
@@ -48,6 +48,7 @@ func main() {
 	reader := jobclient.NewReader(pool)
 
 	m := tui.New(tui.Config{
+		Context:        ctx,
 		Publisher:      pub,
 		Reader:         reader,
 		Pool:           pool,

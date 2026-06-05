@@ -14,6 +14,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -36,6 +37,7 @@ import (
 
 // Config bundles wired dependencies. Build in main(), pass to New.
 type Config struct {
+	Context   context.Context
 	Publisher *jobclient.Publisher
 	Reader    *jobclient.Reader
 	Pool      *pgxpool.Pool
@@ -178,14 +180,23 @@ type Model struct {
 	// listenConn is the dedicated pgx connection that runs LISTEN
 	// jobs_changed (ADR 0012). Held across cmd re-arms because LISTEN is
 	// connection-scoped; nil between drop and reconnect. The TUI does
-	// not release this on shutdown — pool.Close() in main tears it down.
-	listenConn *pgxpool.Conn
+	// not wait for pool.Close() on shutdown because q cancels listenCtx
+	// before returning tea.Quit.
+	listenCtx    context.Context
+	listenCancel context.CancelFunc
+	listenConn   notificationConn
 }
 
 // New constructs a Model ready to be passed to tea.NewProgram. The
 // initial List is dispatched from Init so the program is interactive
 // while the first query is in flight.
 func New(cfg Config) Model {
+	parentCtx := cfg.Context
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	listenCtx, listenCancel := context.WithCancel(parentCtx)
+
 	tbl := table.New(
 		table.WithColumns(defaultColumns(80)),
 		table.WithFocused(true),
@@ -218,6 +229,8 @@ func New(cfg Config) Model {
 		search:       si,
 		loading:      true,
 		statsLoading: true,
+		listenCtx:    listenCtx,
+		listenCancel: listenCancel,
 	}
 }
 
@@ -303,7 +316,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		listJobsCmd(m.cfg.Reader, m.statusFilter),
 		loadStatsCmd(m.cfg.Reader),
-		listenJobsChangedCmd(m.cfg.Pool, nil),
+		listenJobsChangedCmd(m.listenCtx, m.cfg.Pool, nil),
 	)
 }
 
@@ -416,6 +429,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jobsChangedMsg:
 		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				m.listenConn = nil
+				return m, nil
+			}
 			// Dropped LISTEN connection. Cold-path: reload now so any
 			// commits that landed during the gap are visible, surface
 			// the error in the banner, and re-arm the listen after a
@@ -435,11 +452,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			listJobsCmd(m.cfg.Reader, m.statusFilter),
 			loadStatsCmd(m.cfg.Reader),
-			listenJobsChangedCmd(m.cfg.Pool, m.listenConn),
+			listenJobsChangedCmd(m.listenCtx, m.cfg.Pool, m.listenConn),
 		)
 
 	case reconnectListenMsg:
-		return m, listenJobsChangedCmd(m.cfg.Pool, nil)
+		return m, listenJobsChangedCmd(m.listenCtx, m.cfg.Pool, nil)
 
 	case companiesLoadedMsg:
 		// Silent on error — the autocomplete is a nice-to-have, not a
@@ -490,6 +507,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// modeList
 	switch msg.String() {
 	case "ctrl+c", "q":
+		if m.listenCancel != nil {
+			m.listenCancel()
+		}
 		return m, tea.Quit
 	case "n":
 		m.mode = modeNew

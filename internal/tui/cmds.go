@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"job-tracker/internal/db"
@@ -88,13 +89,30 @@ type clearInfoMsg struct{}
 type jobsChangedMsg struct {
 	JobID string
 	Event string
-	conn  *pgxpool.Conn
+	conn  notificationConn
 	err   error
 }
 
 // reconnectListenMsg is fired on a tea.Tick to re-arm the LISTEN after
 // a connection failure.
 type reconnectListenMsg struct{}
+
+type notificationConn interface {
+	WaitForNotification(context.Context) (*pgconn.Notification, error)
+	Release()
+}
+
+type pgNotificationConn struct {
+	conn *pgxpool.Conn
+}
+
+func (c pgNotificationConn) WaitForNotification(ctx context.Context) (*pgconn.Notification, error) {
+	return c.conn.Conn().WaitForNotification(ctx)
+}
+
+func (c pgNotificationConn) Release() {
+	c.conn.Release()
+}
 
 // listenJobsChangedCmd holds one connection out of the pool and blocks
 // on WaitForNotification. The conn is dedicated — LISTEN is connection-
@@ -105,35 +123,43 @@ type reconnectListenMsg struct{}
 //
 // existing == nil means "acquire a fresh conn and issue LISTEN"; that's
 // both the initial path (Init) and the reconnect path.
-func listenJobsChangedCmd(pool *pgxpool.Pool, existing *pgxpool.Conn) tea.Cmd {
+func listenJobsChangedCmd(ctx context.Context, pool *pgxpool.Pool, existing notificationConn) tea.Cmd {
 	return func() tea.Msg {
 		conn := existing
 		if conn == nil {
-			c, err := pool.Acquire(context.Background())
+			c, err := pool.Acquire(ctx)
 			if err != nil {
 				return jobsChangedMsg{err: err}
 			}
-			if _, err := c.Exec(context.Background(), "LISTEN "+db.JobsChangedChannel); err != nil {
+			if _, err := c.Exec(ctx, "LISTEN "+db.JobsChangedChannel); err != nil {
 				c.Release()
 				return jobsChangedMsg{err: err}
 			}
-			conn = c
+			conn = pgNotificationConn{conn: c}
 		}
-		n, err := conn.Conn().WaitForNotification(context.Background())
-		if err != nil {
-			conn.Release()
-			return jobsChangedMsg{err: err}
-		}
-		var payload struct {
-			JobID string `json:"job_id"`
-			Event string `json:"event"`
-		}
-		// Parse failure is non-fatal — the notification is a wakeup, not
-		// the event itself, so an empty JobID/Event still triggers the
-		// reconciling reload in the handler.
-		_ = json.Unmarshal([]byte(n.Payload), &payload)
-		return jobsChangedMsg{JobID: payload.JobID, Event: payload.Event, conn: conn}
+		return waitForJobsChanged(ctx, conn)
 	}
+}
+
+func waitForJobsChanged(ctx context.Context, conn notificationConn) jobsChangedMsg {
+	n, err := conn.WaitForNotification(ctx)
+	if err != nil {
+		conn.Release()
+		return jobsChangedMsg{err: err}
+	}
+	if n == nil {
+		conn.Release()
+		return jobsChangedMsg{err: context.Canceled}
+	}
+	var payload struct {
+		JobID string `json:"job_id"`
+		Event string `json:"event"`
+	}
+	// Parse failure is non-fatal — the notification is a wakeup, not
+	// the event itself, so an empty JobID/Event still triggers the
+	// reconciling reload in the handler.
+	_ = json.Unmarshal([]byte(n.Payload), &payload)
+	return jobsChangedMsg{JobID: payload.JobID, Event: payload.Event, conn: conn}
 }
 
 // reconnectListenAfter returns a Cmd that fires reconnectListenMsg
