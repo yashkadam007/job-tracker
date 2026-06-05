@@ -16,6 +16,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -217,12 +218,14 @@ func New(cfg Config) Model {
 // in tableView to identify the status cell slice for post-render colorising.
 const statusColW = 12
 
+var nowForLastEvent = time.Now
+
 func defaultColumns(width int) []table.Column {
 	// status • title • company • last_event
-	// lastW = 16 matches the "2006-01-02 15:04" format.
+	// lastW = 10 fits the "last event" header and compact relative dates.
 	// Reserve 2 chars on the left for the gutter overlay added in tableView.
 	statusW := statusColW
-	lastW := 16
+	lastW := 10
 	rest := width - statusW - lastW - 6 - 2
 	if rest < 30 {
 		rest = 30
@@ -237,10 +240,40 @@ func defaultColumns(width int) []table.Column {
 	}
 }
 
-// fmtWhen is the single source of truth for date display. ISO ordering
-// sorts mentally and matches between list and detail.
+// fmtWhen renders full local datetimes for detail fields and notes.
 func fmtWhen(t time.Time) string {
 	return t.Local().Format("2006-01-02 15:04")
+}
+
+func fmtTableLastEvent(t time.Time) string {
+	return fmtRelativeWhen(t, nowForLastEvent())
+}
+
+func fmtRelativeWhen(t, now time.Time) string {
+	eventDay := localCalendarDay(t)
+	nowDay := localCalendarDay(now)
+	days := int(nowDay.Sub(eventDay).Hours() / 24)
+	if days == 0 {
+		return "today"
+	}
+	if days < 0 {
+		return fmtWhen(t)
+	}
+	if days <= 30 {
+		return fmt.Sprintf("%dd ago", days)
+	}
+
+	months := int(math.Round(float64(days) / 30))
+	if months < 12 {
+		return fmt.Sprintf("%dm ago", months)
+	}
+	years := int(math.Round(float64(months) / 12))
+	return fmt.Sprintf("%dy ago", years)
+}
+
+func localCalendarDay(t time.Time) time.Time {
+	y, m, d := t.Local().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
 // padRight pads s with trailing spaces to display width n. Used for
@@ -813,7 +846,7 @@ func (m *Model) applyFilter() {
 			statusCell,
 			truncate(j.Title, 60),
 			truncate(j.Company, 30),
-			fmtWhen(j.LastEventAt),
+			fmtTableLastEvent(j.LastEventAt),
 		})
 	}
 	m.tbl.SetRows(rows)

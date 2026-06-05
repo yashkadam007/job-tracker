@@ -111,6 +111,89 @@ func TestApplyStatusWithUnloadedStatsDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestFmtRelativeWhen(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, loc)
+
+	tests := []struct {
+		name string
+		when time.Time
+		want string
+	}{
+		{
+			name: "same local date",
+			when: time.Date(2026, 6, 5, 1, 0, 0, 0, loc),
+			want: "today",
+		},
+		{
+			name: "one day",
+			when: now.AddDate(0, 0, -1),
+			want: "1d ago",
+		},
+		{
+			name: "four days",
+			when: now.AddDate(0, 0, -4),
+			want: "4d ago",
+		},
+		{
+			name: "thirty days",
+			when: now.AddDate(0, 0, -30),
+			want: "30d ago",
+		},
+		{
+			name: "thirty one days rounds to one month",
+			when: now.AddDate(0, 0, -31),
+			want: "1m ago",
+		},
+		{
+			name: "forty five days rounds to two months",
+			when: now.AddDate(0, 0, -45),
+			want: "2m ago",
+		},
+		{
+			name: "twelve rounded months renders as one year",
+			when: now.AddDate(0, 0, -360),
+			want: "1y ago",
+		},
+		{
+			name: "future different day falls back to full datetime",
+			when: now.AddDate(0, 0, 1),
+			want: now.AddDate(0, 0, 1).Local().Format("2006-01-02 15:04"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fmtRelativeWhen(tt.when, now); got != tt.want {
+				t.Fatalf("fmtRelativeWhen() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyFilterUsesRelativeLastEventInTableRows(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, loc)
+	oldNowForLastEvent := nowForLastEvent
+	nowForLastEvent = func() time.Time { return now }
+	defer func() { nowForLastEvent = oldNowForLastEvent }()
+
+	m := New(Config{})
+	job := testJob("1", "Alpha Backend", events.StatusSaved)
+	job.LastEventAt = now.AddDate(0, 0, -4)
+	m.jobs = []jobclient.Job{job}
+
+	m.applyFilter()
+
+	rows := m.tbl.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := rows[0][3]; got != "4d ago" {
+		t.Fatalf("last event cell = %q, want %q", got, "4d ago")
+	}
+}
+
 func testJob(id, title string, status events.JobStatus) jobclient.Job {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	return jobclient.Job{
